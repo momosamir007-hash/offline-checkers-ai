@@ -5,3 +5,4 @@ Pillow>=9.5.0
 opencv-python-headless>=4.8.0 
 xgboost>=2.0.0 
 pandas>=2.0.0
+pydraughts>=0.6.0
