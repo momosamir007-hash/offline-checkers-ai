@@ -2,7 +2,7 @@
 """
 ╔═════════════════════════════════════════════════════════╗
 ║ ♟️ مساعد الداما الذكي — النسخة السحابية النهائية        ║
-║ Super Engine (Depth 8+) + Memory (TT) + OpenCV          ║
+║ Super Engine (Tactical) + Memory (TT) + OpenCV          ║
 ║ لا يحتاج إلى تدريب أو ملفات خارجية! يعمل مباشرة         ║
 ╚═════════════════════════════════════════════════════════╝
 """
@@ -216,7 +216,7 @@ class TransTable:
         return None
 
     def store(self, key, depth, score, flag, move):
-        if len(self.table) > self.max_size: self.table.clear() # تفريغ لتجنب استهلاك الرام السحابي
+        if len(self.table) > self.max_size: self.table.clear() 
         self.table[key] = (depth, score, flag, move)
 
 # ══════════════════════════════════════════
@@ -234,6 +234,7 @@ class SuperAI:
         self.history = {}
 
     def evaluate(self, eng, player):
+        """دالة تقييم تكتيكية شرسة"""
         b = eng.board
         opp = eng.opp(player)
         my_men = (b == P.L) if player in (P.L, P.LK) else (b == P.D)
@@ -247,16 +248,42 @@ class SuperAI:
         if mn + mk == 0: return -99999
         if on + ok_ == 0: return 99999
 
+        # 1. المادة
         score = (mn * 100 + mk * 300) - (on * 100 + ok_ * 300)
         
+        # 2. التموضع الاستراتيجي وحماية صف القاعدة
         if player in (P.L, P.LK):
-            score += float(np.sum(my_men * LIGHT_POS)) * 3
-            score -= float(np.sum(op_men * DARK_POS)) * 3
+            score += float(np.sum(my_men * LIGHT_POS)) * 4
+            score -= float(np.sum(op_men * DARK_POS)) * 4
+            score += int(np.sum(b[7, :] == P.L)) * 15
+            score -= int(np.sum(b[0, :] == P.D)) * 15
         else:
-            score += float(np.sum(my_men * DARK_POS)) * 3
-            score -= float(np.sum(op_men * LIGHT_POS)) * 3
+            score += float(np.sum(my_men * DARK_POS)) * 4
+            score -= float(np.sum(op_men * LIGHT_POS)) * 4
+            score += int(np.sum(b[0, :] == P.D)) * 15
+            score -= int(np.sum(b[7, :] == P.L)) * 15
 
-        score += float(np.sum(my_king * KING_POS)) * 2 - float(np.sum(op_king * KING_POS)) * 2
+        score += float(np.sum(my_king * KING_POS)) * 3 - float(np.sum(op_king * KING_POS)) * 3
+
+        # 3. ترابط القطع
+        for r in range(8):
+            for c in range(8):
+                p = b[r][c]
+                if p == P.E: continue
+                is_mine = eng.owns(p, player)
+                allies = 0
+                for dr, dc in ((-1,-1), (-1,1), (1,-1), (1,1)):
+                    ar, ac = r + dr, c + dc
+                    if 0 <= ar < 8 and 0 <= ac < 8 and eng.owns(b[ar][ac], p):
+                        allies += 1
+                if is_mine: score += allies * 4
+                else: score -= allies * 4
+
+        # 4. حرية الحركة
+        my_moves, _ = eng.get_moves(player)
+        op_moves, _ = eng.get_moves(opp)
+        score += len(my_moves) * 2 - len(op_moves) * 2
+
         return score
 
     def check_time(self):
@@ -332,7 +359,6 @@ class SuperAI:
             child = eng.copy(); child.do_move(move)
             
             best_s = 0; best_d = 0
-            # Iterative Deepening for each move
             for d in range(1, 15):
                 s, _ = self.alpha_beta(child, d, float("-inf"), float("inf"), eng.opp(player), eng.opp(player))
                 if self.time_up or time.time() - self.start_time > time_each * (len(results)+1): break
