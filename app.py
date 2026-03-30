@@ -1,134 +1,88 @@
 #!/usr/bin/env python3
 """
-╔═══════════════════════════════════════════════════════╗
-║      محرك الداما المستقل - النسخة النهائية v2.0       ║
-║      Offline Checkers AI Engine - Final Edition       ║
-║                                                       ║
-║  ✅ محرك كامل: أكل، ملوك، أكل متعدد، أكل إجباري     ║
-║  ✅ Minimax + Alpha-Beta Pruning                      ║
-║  ✅ رؤية حاسوبية بـ HSV + تباين                       ║
-║  ✅ رسم بصري للرقعة + أسهم الحركات                    ║
-║  ✅ محرر يدوي تفاعلي                                  ║
-║  ✅ 4 مستويات صعوبة                                   ║
-╚═══════════════════════════════════════════════════════╝
+╔════════════════════════════════════════════╗
+║   ♟️ لعبة الداما التفاعلية v3.0           ║
+║   اضغط على القطعة → اضغط على الوجهة      ║
+║   Minimax + Alpha-Beta AI                  ║
+╚════════════════════════════════════════════╝
 """
 
 import streamlit as st
-import cv2
 import numpy as np
 from PIL import Image, ImageDraw
 import time
 from enum import IntEnum
-from typing import List, Tuple, Optional, Dict
 
-# ══════════════════════════════════════════════════════
-# 1. الثوابت والتعريفات
-# ══════════════════════════════════════════════════════
+
+# ══════════════════════════════════════════
+# 1. ثوابت اللعبة
+# ══════════════════════════════════════════
 
 class Piece(IntEnum):
-    """أنواع القطع على الرقعة"""
-    EMPTY      = 0
-    LIGHT      = 1   # قطعة فاتحة عادية
-    DARK       = 2   # قطعة داكنة عادية
-    LIGHT_KING = 3   # ملك فاتح (ضامة)
-    DARK_KING  = 4   # ملك داكن (ضامة)
+    EMPTY = 0
+    LIGHT = 1
+    DARK = 2
+    LIGHT_KING = 3
+    DARK_KING = 4
 
 
-BOARD_SIZE = 8
-
-# ── ألوان الرسم ──
-COLORS = {
-    "light_sq":    (240, 217, 181),
-    "dark_sq":     (181, 136, 99),
-    "light_piece": (255, 253, 245),
-    "dark_piece":  (60,  60,  60),
-    "light_edge":  (210, 200, 185),
-    "dark_edge":   (30,  30,  30),
-    "king_mark":   (255, 215,   0),
-    "king_edge":   (200, 170,   0),
-    "highlight":   (80,  220,  80),
-    "arrow":       (255, 255,   0),
-    "arrow_start": (0,   200, 100),
-    "coord":       (140, 120, 100),
-    "shadow":      (80,  60,  40),
-}
-
-# ── ثوابت الرسم ──
-CELL_SIZE    = 72
-PIECE_RADIUS = 28
-KING_RADIUS  = 11
-
-
-# ══════════════════════════════════════════════════════
-# 2. محرك اللعبة الكامل (Full Checkers Engine)
-# ══════════════════════════════════════════════════════
+# ══════════════════════════════════════════
+# 2. محرك اللعبة الكامل
+# ══════════════════════════════════════════
 
 class CheckersEngine:
     """
     محرك داما كامل القواعد:
-      • حركات بسيطة قُطرية
-      • أكل (قفز) فوق قطع الخصم
-      • أكل متعدد متسلسل
-      • أكل إجباري (إذا يمكنك الأكل يجب عليك)
-      • ترقية للملك عند الوصول للحافة
-      • الملك يتحرك في الاتجاهات الأربعة
+    - حركات عادية + أكل + أكل متعدد
+    - أكل إجباري + ملوك (ضامة)
+    - ترقية تلقائية عند الحافة
     """
 
     def __init__(self, board=None):
         if board is not None:
             self.board = np.array(board, dtype=np.int8)
         else:
-            self.board = self._create_initial_board()
+            self.board = self._initial_board()
 
-    # ──────────────────────────────────
-    # إنشاء الرقعة الابتدائية
-    # ──────────────────────────────────
     @staticmethod
-    def _create_initial_board() -> np.ndarray:
-        """رقعة داما كلاسيكية 8×8"""
-        board = np.zeros((8, 8), dtype=np.int8)
+    def _initial_board():
+        b = np.zeros((8, 8), dtype=np.int8)
         for r in range(8):
             for c in range(8):
-                if (r + c) % 2 != 0:       # المربعات الداكنة فقط
+                if (r + c) % 2 != 0:
                     if r < 3:
-                        board[r][c] = Piece.DARK
+                        b[r][c] = Piece.DARK
                     elif r > 4:
-                        board[r][c] = Piece.LIGHT
-        return board
+                        b[r][c] = Piece.LIGHT
+        return b
 
-    # ──────────────────────────────────
-    # نسخة سريعة (بدون deepcopy)
-    # ──────────────────────────────────
-    def copy(self) -> "CheckersEngine":
-        new = CheckersEngine.__new__(CheckersEngine)
-        new.board = self.board.copy()   # numpy copy أسرع 50x من deepcopy
-        return new
+    def copy(self):
+        e = CheckersEngine.__new__(CheckersEngine)
+        e.board = self.board.copy()
+        return e
 
-    # ──────────────────────────────────
-    # دوال مساعدة للقطع
-    # ──────────────────────────────────
-    @staticmethod
-    def is_light(piece: int) -> bool:
-        return piece in (Piece.LIGHT, Piece.LIGHT_KING)
+    # ── تصنيف القطع ──
 
     @staticmethod
-    def is_dark(piece: int) -> bool:
-        return piece in (Piece.DARK, Piece.DARK_KING)
+    def is_light(p):
+        return p in (Piece.LIGHT, Piece.LIGHT_KING)
 
     @staticmethod
-    def is_king(piece: int) -> bool:
-        return piece in (Piece.LIGHT_KING, Piece.DARK_KING)
+    def is_dark(p):
+        return p in (Piece.DARK, Piece.DARK_KING)
 
     @staticmethod
-    def same_team(piece: int, player: int) -> bool:
-        """هل القطعة من نفس فريق اللاعب؟"""
+    def is_king(p):
+        return p in (Piece.LIGHT_KING, Piece.DARK_KING)
+
+    @staticmethod
+    def belongs_to(piece, player):
         if player in (Piece.LIGHT, Piece.LIGHT_KING):
             return piece in (Piece.LIGHT, Piece.LIGHT_KING)
         return piece in (Piece.DARK, Piece.DARK_KING)
 
     @staticmethod
-    def enemy_of(piece: int, player: int) -> bool:
-        """هل القطعة من فريق الخصم؟"""
+    def is_enemy(piece, player):
         if piece == Piece.EMPTY:
             return False
         if player in (Piece.LIGHT, Piece.LIGHT_KING):
@@ -136,175 +90,136 @@ class CheckersEngine:
         return piece in (Piece.LIGHT, Piece.LIGHT_KING)
 
     @staticmethod
-    def opponent(player: int) -> int:
-        """إرجاع الخصم"""
+    def opponent(player):
         if player in (Piece.LIGHT, Piece.LIGHT_KING):
             return Piece.DARK
         return Piece.LIGHT
 
-    # ──────────────────────────────────
-    # اتجاهات الحركة
-    # ──────────────────────────────────
     @staticmethod
-    def get_directions(piece: int) -> List[Tuple[int, int]]:
-        """الاتجاهات القُطرية المسموحة لكل نوع قطعة"""
+    def directions(piece):
         if piece == Piece.LIGHT:
-            return [(-1, -1), (-1, 1)]         # لأعلى فقط
-        elif piece == Piece.DARK:
-            return [(1, -1), (1, 1)]           # لأسفل فقط
-        elif piece in (Piece.LIGHT_KING, Piece.DARK_KING):
-            return [(-1, -1), (-1, 1),
-                    (1, -1),  (1, 1)]          # كل الاتجاهات
+            return [(-1, -1), (-1, 1)]
+        if piece == Piece.DARK:
+            return [(1, -1), (1, 1)]
+        if piece in (Piece.LIGHT_KING, Piece.DARK_KING):
+            return [(-1, -1), (-1, 1), (1, -1), (1, 1)]
         return []
 
-    # ──────────────────────────────────
-    # الحركات البسيطة (بدون أكل)
-    # ──────────────────────────────────
-    def _get_simple_moves(self, r: int, c: int) -> list:
-        piece = self.board[r][c]
-        if piece == Piece.EMPTY:
-            return []
+    # ── الحركات البسيطة ──
 
+    def _simple_moves(self, r, c):
+        p = self.board[r][c]
         moves = []
-        for dr, dc in self.get_directions(piece):
+        for dr, dc in self.directions(p):
             nr, nc = r + dr, c + dc
             if 0 <= nr < 8 and 0 <= nc < 8:
                 if self.board[nr][nc] == Piece.EMPTY:
                     moves.append(((r, c), (nr, nc)))
         return moves
 
-    # ──────────────────────────────────
-    # حركات الأكل (مع أكل متعدد)
-    # ──────────────────────────────────
-    def _get_jump_chains(
-        self, r: int, c: int,
-        board: np.ndarray = None,
-        eaten: frozenset = None
-    ) -> list:
-        """
-        إيجاد كل سلاسل الأكل الممكنة من موقع (r, c).
-        يدعم الأكل المتعدد المتسلسل.
-        يُرجع قائمة من المسارات، كل مسار = tuple من المواقع.
-        """
+    # ── سلاسل الأكل (مع أكل متعدد) ──
+
+    def _jump_chains(self, r, c, board=None, eaten=None):
         if board is None:
             board = self.board
         if eaten is None:
             eaten = frozenset()
 
-        piece = board[r][c]
-        if piece == Piece.EMPTY:
-            return []
-
+        p = board[r][c]
         chains = []
 
-        for dr, dc in self.get_directions(piece):
-            # موقع القطعة المُراد أكلها
+        for dr, dc in self.directions(p):
             mr, mc = r + dr, c + dc
-            # موقع الهبوط بعد القفز
             nr, nc = r + 2 * dr, c + 2 * dc
 
             if not (0 <= nr < 8 and 0 <= nc < 8):
                 continue
             if board[nr][nc] != Piece.EMPTY:
                 continue
-            if not self.enemy_of(board[mr][mc], piece):
+            if not self.is_enemy(board[mr][mc], p):
                 continue
             if (mr, mc) in eaten:
                 continue
 
-            # ─ تنفيذ الأكل مؤقتاً ─
-            new_board = board.copy()
-            new_board[nr][nc] = piece
-            new_board[r][c]   = Piece.EMPTY
-            new_board[mr][mc] = Piece.EMPTY
+            nb = board.copy()
+            nb[nr][nc] = p
+            nb[r][c] = Piece.EMPTY
+            nb[mr][mc] = Piece.EMPTY
 
-            # ترقية إذا وصل الحافة
             promoted = False
-            if nr == 0 and piece == Piece.LIGHT:
-                new_board[nr][nc] = Piece.LIGHT_KING
+            if nr == 0 and p == Piece.LIGHT:
+                nb[nr][nc] = Piece.LIGHT_KING
                 promoted = True
-            elif nr == 7 and piece == Piece.DARK:
-                new_board[nr][nc] = Piece.DARK_KING
+            elif nr == 7 and p == Piece.DARK:
+                nb[nr][nc] = Piece.DARK_KING
                 promoted = True
 
-            new_eaten = eaten | {(mr, mc)}
+            ne = eaten | {(mr, mc)}
 
-            # ─ البحث عن أكل إضافي ─
-            # (في بعض القوانين: الترقية توقف الأكل المتعدد)
+            further = []
             if not promoted:
-                further = self._get_jump_chains(
-                    nr, nc, new_board, new_eaten
-                )
-            else:
-                further = []
+                further = self._jump_chains(nr, nc, nb, ne)
 
             if further:
-                for chain in further:
-                    # ربط المسار: (البداية, القفزة الأولى, ...باقي السلسلة)
-                    chains.append(
-                        ((r, c),) + chain
-                    )
+                for ch in further:
+                    chains.append(((r, c),) + ch)
             else:
                 chains.append(((r, c), (nr, nc)))
 
         return chains
 
-    # ──────────────────────────────────
-    # جميع الحركات المتاحة
-    # ──────────────────────────────────
-    def get_all_moves(self, player: int) -> Tuple[list, bool]:
-        """
-        كل الحركات القانونية للاعب.
-        قاعدة الأكل الإجباري: إذا يمكنك الأكل → يجب عليك.
-        يُرجع: (قائمة_الحركات, هل_هي_أكل)
-        """
-        all_jumps  = []
-        all_simple = []
+    # ── جميع الحركات (مع الأكل الإجباري) ──
+
+    def get_all_moves(self, player):
+        """يُرجع (قائمة_الحركات, هل_هي_أكل)"""
+        jumps = []
+        simple = []
 
         for r in range(8):
             for c in range(8):
-                if self.same_team(self.board[r][c], player):
-                    # حركات الأكل
-                    jumps = self._get_jump_chains(r, c)
-                    all_jumps.extend(jumps)
-                    # حركات بسيطة
-                    simple = self._get_simple_moves(r, c)
-                    all_simple.extend(simple)
+                if self.belongs_to(self.board[r][c], player):
+                    jumps.extend(self._jump_chains(r, c))
+                    simple.extend(self._simple_moves(r, c))
 
-        # ── الأكل الإجباري ──
-        if all_jumps:
-            # إرجاع أطول سلاسل الأكل فقط (اختياري)
-            max_len = max(len(j) for j in all_jumps)
-            longest = [j for j in all_jumps if len(j) == max_len]
+        # الأكل الإجباري
+        if jumps:
+            max_len = max(len(j) for j in jumps)
+            longest = [j for j in jumps if len(j) == max_len]
             return longest, True
 
-        return all_simple, False
+        return simple, False
 
-    # ──────────────────────────────────
-    # تنفيذ حركة
-    # ──────────────────────────────────
-    def execute_move(self, move: tuple):
-        """تنفيذ حركة (بسيطة أو سلسلة أكل) على الرقعة"""
+    # ── تنفيذ حركة ──
+
+    def execute_move(self, move):
+        """
+        تنفيذ الحركة:
+        - القطعة تختفي من مكانها الأصلي
+        - تظهر في المكان الجديد
+        - القطع المأكولة تختفي
+        """
         if len(move) < 2:
             return
 
         piece = self.board[move[0][0]][move[0][1]]
+
+        # ── مسح الموقع الأصلي (القطعة تختفي) ──
         self.board[move[0][0]][move[0][1]] = Piece.EMPTY
 
+        # ── معالجة كل خطوة في السلسلة ──
         for i in range(len(move) - 1):
             sr, sc = move[i]
             er, ec = move[i + 1]
+            dr, dc = er - sr, ec - sc
 
-            dr = er - sr
-            dc = ec - sc
-
-            # إذا كانت قفزة (المسافة = 2)
+            # إذا كانت قفزة (أكل)
             if abs(dr) == 2 and abs(dc) == 2:
                 mr = sr + dr // 2
                 mc = sc + dc // 2
+                # ── القطعة المأكولة تختفي ──
                 self.board[mr][mc] = Piece.EMPTY
 
-        # وضع القطعة في الموقع النهائي
+        # ── القطعة تظهر في الموقع الجديد ──
         fr, fc = move[-1]
         self.board[fr][fc] = piece
 
@@ -314,79 +229,54 @@ class CheckersEngine:
         elif fr == 7 and piece == Piece.DARK:
             self.board[fr][fc] = Piece.DARK_KING
 
-    # ──────────────────────────────────
-    # إحصائيات
-    # ──────────────────────────────────
-    def count_pieces(self, player: int) -> dict:
-        normal = 0
-        kings  = 0
+    # ── إحصائيات ──
+
+    def count_pieces(self, player):
+        n = k = 0
         for r in range(8):
             for c in range(8):
                 p = self.board[r][c]
-                if self.same_team(p, player):
+                if self.belongs_to(p, player):
                     if self.is_king(p):
-                        kings += 1
+                        k += 1
                     else:
-                        normal += 1
-        return {"normal": normal, "kings": kings, "total": normal + kings}
+                        n += 1
+        return {"normal": n, "kings": k, "total": n + k}
 
-    def is_game_over(self) -> Optional[int]:
-        """
-        None = اللعبة مستمرة
-        Piece.LIGHT = فاز الفاتح
-        Piece.DARK  = فاز الداكن
-        -1 = تعادل (لا حركات لأحد)
-        """
-        light = self.count_pieces(Piece.LIGHT)["total"]
-        dark  = self.count_pieces(Piece.DARK)["total"]
+    def game_over(self):
+        """None = مستمرة, LIGHT/DARK = فائز, -1 = تعادل"""
+        lt = self.count_pieces(Piece.LIGHT)["total"]
+        dt = self.count_pieces(Piece.DARK)["total"]
 
-        if light == 0:
+        if lt == 0:
             return Piece.DARK
-        if dark == 0:
+        if dt == 0:
             return Piece.LIGHT
 
-        light_moves, _ = self.get_all_moves(Piece.LIGHT)
-        dark_moves,  _ = self.get_all_moves(Piece.DARK)
+        lm, _ = self.get_all_moves(Piece.LIGHT)
+        dm, _ = self.get_all_moves(Piece.DARK)
 
-        if not light_moves and not dark_moves:
+        if not lm and not dm:
             return -1
-        if not light_moves:
+        if not lm:
             return Piece.DARK
-        if not dark_moves:
+        if not dm:
             return Piece.LIGHT
-
         return None
 
 
-# ══════════════════════════════════════════════════════
-# 3. الذكاء الاصطناعي (Minimax + Alpha-Beta)
-# ══════════════════════════════════════════════════════
+# ══════════════════════════════════════════
+# 3. محرك الذكاء الاصطناعي
+# ══════════════════════════════════════════
 
 class CheckersAI:
-    """
-    محرك ذكاء اصطناعي:
-      • Minimax مع Alpha-Beta Pruning
-      • دالة تقييم متعددة العوامل
-      • إحصائيات الأداء
-    """
+    """Minimax + Alpha-Beta Pruning"""
 
-    def __init__(self, max_depth: int = 5):
-        self.max_depth = max_depth
-        self.nodes_evaluated = 0
+    def __init__(self, depth=4):
+        self.depth = depth
+        self.nodes = 0
 
-    # ──────────────────────────────────
-    # دالة التقييم المتقدمة
-    # ──────────────────────────────────
-    def evaluate(self, engine: CheckersEngine, player: int) -> float:
-        """
-        تقييم متعدد العوامل:
-          1. عدد القطع (×10) والملوك (×25)
-          2. مكافأة التقدم نحو الترقية
-          3. مكافأة السيطرة على المركز
-          4. مكافأة حماية الحواف
-          5. مكافأة حرية الحركة
-          6. عقوبة القطع المعزولة
-        """
+    def evaluate(self, engine, player):
         score = 0.0
         opp = engine.opponent(player)
 
@@ -396,842 +286,876 @@ class CheckersAI:
                 if p == Piece.EMPTY:
                     continue
 
-                val = 0.0
+                val = 25.0 if engine.is_king(p) else 10.0
 
-                # ── (1) قيمة القطعة ──
-                if engine.is_king(p):
-                    val = 25.0
-                else:
-                    val = 10.0
-
-                # ── (2) مكافأة التقدم ──
                 if p == Piece.LIGHT:
-                    val += (7 - r) * 0.7    # كلما اقتربت من السطر 0
+                    val += (7 - r) * 0.7
                 elif p == Piece.DARK:
-                    val += r * 0.7          # كلما اقتربت من السطر 7
+                    val += r * 0.7
 
-                # ── (3) مكافأة المركز ──
-                center_dist = abs(r - 3.5) + abs(c - 3.5)
-                val += (5.0 - center_dist) * 0.3
+                cd = abs(r - 3.5) + abs(c - 3.5)
+                val += (5.0 - cd) * 0.3
 
-                # ── (4) مكافأة الحواف ──
                 if c == 0 or c == 7:
-                    val += 0.8
-                if r == 0 or r == 7:
                     val += 0.5
 
-                # ── (5) عقوبة العزلة ──
-                has_ally = False
-                for dr, dc in [(-1,-1),(-1,1),(1,-1),(1,1)]:
-                    ar, ac = r + dr, c + dc
-                    if 0 <= ar < 8 and 0 <= ac < 8:
-                        if engine.same_team(engine.board[ar][ac], p):
-                            has_ally = True
-                            break
-                if not has_ally:
-                    val -= 1.0
-
-                # ── جمع النتيجة ──
-                if engine.same_team(p, player):
+                if engine.belongs_to(p, player):
                     score += val
                 else:
                     score -= val
 
-        # ── (6) مكافأة حرية الحركة ──
-        my_moves,  _ = engine.get_all_moves(player)
-        opp_moves, _ = engine.get_all_moves(opp)
-        score += len(my_moves)  * 0.4
-        score -= len(opp_moves) * 0.4
+        my_m, _ = engine.get_all_moves(player)
+        op_m, _ = engine.get_all_moves(opp)
+        score += len(my_m) * 0.3 - len(op_m) * 0.3
 
         return score
 
-    # ──────────────────────────────────
-    # خوارزمية Minimax + Alpha-Beta
-    # ──────────────────────────────────
-    def _minimax(
-        self,
-        engine: CheckersEngine,
-        depth: int,
-        alpha: float,
-        beta: float,
-        maximizing: bool,
-        current_player: int,
-        original_player: int
-    ) -> Tuple[float, Optional[tuple]]:
+    def minimax(self, engine, depth, alpha, beta,
+                maximizing, current, original):
+        self.nodes += 1
 
-        self.nodes_evaluated += 1
-
-        # ── حالة الإنهاء ──
-        game_result = engine.is_game_over()
-        if game_result is not None:
-            if game_result == original_player:
-                return 9999.0, None     # فوز
-            elif game_result == -1:
-                return 0.0, None        # تعادل
+        result = engine.game_over()
+        if result is not None:
+            if result == original:
+                return 9999.0, None
+            elif result == -1:
+                return 0.0, None
             else:
-                return -9999.0, None    # خسارة
+                return -9999.0, None
 
         if depth == 0:
-            return self.evaluate(engine, original_player), None
+            return self.evaluate(engine, original), None
 
-        moves, _ = engine.get_all_moves(current_player)
+        moves, _ = engine.get_all_moves(current)
         if not moves:
-            return self.evaluate(engine, original_player), None
+            return self.evaluate(engine, original), None
 
         best_move = moves[0]
-        next_player = engine.opponent(current_player)
+        nxt = engine.opponent(current)
 
         if maximizing:
-            max_eval = float("-inf")
-            for move in moves:
+            max_e = float("-inf")
+            for m in moves:
                 child = engine.copy()
-                child.execute_move(move)
-
-                val, _ = self._minimax(
+                child.execute_move(m)
+                v, _ = self.minimax(
                     child, depth - 1, alpha, beta,
-                    False, next_player, original_player
+                    False, nxt, original
                 )
-
-                if val > max_eval:
-                    max_eval = val
-                    best_move = move
-
-                alpha = max(alpha, val)
+                if v > max_e:
+                    max_e = v
+                    best_move = m
+                alpha = max(alpha, v)
                 if beta <= alpha:
-                    break               # ← قطع Beta ✂️
-
-            return max_eval, best_move
-
+                    break
+            return max_e, best_move
         else:
-            min_eval = float("inf")
-            for move in moves:
+            min_e = float("inf")
+            for m in moves:
                 child = engine.copy()
-                child.execute_move(move)
-
-                val, _ = self._minimax(
+                child.execute_move(m)
+                v, _ = self.minimax(
                     child, depth - 1, alpha, beta,
-                    True, next_player, original_player
+                    True, nxt, original
                 )
-
-                if val < min_eval:
-                    min_eval = val
-                    best_move = move
-
-                beta = min(beta, val)
+                if v < min_e:
+                    min_e = v
+                    best_move = m
+                beta = min(beta, v)
                 if beta <= alpha:
-                    break               # ← قطع Alpha ✂️
+                    break
+            return min_e, best_move
 
-            return min_eval, best_move
-
-    # ──────────────────────────────────
-    # الواجهة العامة
-    # ──────────────────────────────────
-    def find_best_move(
-        self, engine: CheckersEngine, player: int
-    ) -> Dict:
-        """حساب أفضل حركة مع إحصائيات الأداء"""
-        self.nodes_evaluated = 0
+    def find_best(self, engine, player):
+        self.nodes = 0
         t0 = time.time()
-
-        score, move = self._minimax(
-            engine, self.max_depth,
+        score, move = self.minimax(
+            engine, self.depth,
             float("-inf"), float("inf"),
             True, player, player
         )
-
-        elapsed = time.time() - t0
-
         return {
-            "move":  move,
+            "move": move,
             "score": round(score, 2),
-            "nodes": self.nodes_evaluated,
-            "time":  round(elapsed, 3),
-            "depth": self.max_depth,
+            "nodes": self.nodes,
+            "time": round(time.time() - t0, 3),
         }
 
 
-# ══════════════════════════════════════════════════════
-# 4. الرؤية الحاسوبية المحسّنة (OpenCV)
-# ══════════════════════════════════════════════════════
+# ══════════════════════════════════════════
+# 4. رسم الرقعة البصرية
+# ══════════════════════════════════════════
 
-class BoardVision:
-    """تحليل صورة الرقعة بـ HSV + Variance"""
-
-    @staticmethod
-    def auto_crop(image_pil: Image.Image) -> Image.Image:
-        """محاولة اكتشاف حدود الرقعة تلقائياً"""
-        img = cv2.cvtColor(np.array(image_pil), cv2.COLOR_RGB2BGR)
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        blur = cv2.GaussianBlur(gray, (5, 5), 0)
-        edges = cv2.Canny(blur, 40, 120)
-
-        contours, _ = cv2.findContours(
-            edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
-        )
-
-        if contours:
-            largest = max(contours, key=cv2.contourArea)
-            area = cv2.contourArea(largest)
-            img_area = img.shape[0] * img.shape[1]
-
-            if area > img_area * 0.2:
-                x, y, w, h = cv2.boundingRect(largest)
-                ratio = w / h if h > 0 else 0
-                if 0.6 < ratio < 1.4:
-                    cropped = img[y:y+h, x:x+w]
-                    return Image.fromarray(
-                        cv2.cvtColor(cropped, cv2.COLOR_BGR2RGB)
-                    )
-
-        return image_pil
+class Renderer:
+    CELL = 70
 
     @staticmethod
-    def analyze(
-        image_pil: Image.Image,
-        light_thresh: int = 160,
-        dark_thresh: int = 100
-    ) -> Tuple[np.ndarray, list]:
-        """
-        تحليل الصورة → مصفوفة 8×8
-        يستخدم HSV color space + variance للدقة.
-        """
-        img = cv2.cvtColor(np.array(image_pil), cv2.COLOR_RGB2BGR)
-        img = cv2.resize(img, (400, 400))
-
-        hsv  = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-
-        cell_h = 50   # 400 / 8
-        cell_w = 50
-
-        board = np.zeros((8, 8), dtype=np.int8)
-        debug = []
-
-        for r in range(8):
-            for c in range(8):
-                if (r + c) % 2 == 0:
-                    continue  # المربعات الفاتحة → تخطي
-
-                # عينة من وسط المربع (50% المركزية)
-                margin = cell_h // 4
-                y1 = r * cell_h + margin
-                y2 = (r + 1) * cell_h - margin
-                x1 = c * cell_w + margin
-                x2 = (c + 1) * cell_w - margin
-
-                roi_gray = gray[y1:y2, x1:x2]
-                roi_hsv  = hsv[y1:y2, x1:x2]
-
-                brightness = float(np.mean(roi_gray))
-                saturation = float(np.mean(roi_hsv[:, :, 1]))
-                variance   = float(np.var(roi_gray))
-
-                # ── منطق التمييز ──
-                detected = Piece.EMPTY
-
-                # وجود قطعة = تباين عالي أو تشبّع ملحوظ
-                has_piece = (variance > 150) or (saturation > 35)
-
-                if has_piece:
-                    if brightness > light_thresh:
-                        detected = Piece.LIGHT
-                    elif brightness < dark_thresh:
-                        detected = Piece.DARK
-
-                board[r][c] = detected
-                debug.append({
-                    "row": r, "col": c,
-                    "brightness": round(brightness, 1),
-                    "saturation": round(saturation, 1),
-                    "variance":   round(variance, 1),
-                    "detected":   int(detected),
-                })
-
-        return board, debug
-
-
-# ══════════════════════════════════════════════════════
-# 5. رسم الرقعة البصري (Board Renderer)
-# ══════════════════════════════════════════════════════
-
-class BoardRenderer:
-    """رسم رقعة احترافية بـ Pillow"""
-
-    @staticmethod
-    def render(
-        board: np.ndarray,
-        highlight: list = None
-    ) -> Image.Image:
-        """رسم الرقعة كصورة"""
-        size = CELL_SIZE * 8
-        img  = Image.new("RGB", (size, size))
+    def render(board, selected=None, valid_dests=None,
+               last_move=None):
+        C = Renderer.CELL
+        sz = C * 8
+        img = Image.new("RGB", (sz, sz))
         draw = ImageDraw.Draw(img)
 
-        # ── المربعات ──
         for r in range(8):
             for c in range(8):
-                x1 = c * CELL_SIZE
-                y1 = r * CELL_SIZE
-                x2 = x1 + CELL_SIZE
-                y2 = y1 + CELL_SIZE
+                x1, y1 = c * C, r * C
+                x2, y2 = x1 + C, y1 + C
 
                 if (r + c) % 2 == 0:
-                    sq_color = COLORS["light_sq"]
+                    sq = (240, 217, 181)
                 else:
-                    sq_color = COLORS["dark_sq"]
+                    sq = (181, 136, 99)
 
-                draw.rectangle([x1, y1, x2, y2], fill=sq_color)
+                if selected and (r, c) == selected:
+                    sq = (100, 220, 100)
+                elif valid_dests and (r, c) in valid_dests:
+                    sq = (255, 220, 60)
+                elif last_move and (r, c) in last_move:
+                    if (r + c) % 2 != 0:
+                        sq = (150, 180, 220)
 
-        # ── تمييز مربعات الحركة ──
-        if highlight:
-            for pos in highlight:
-                r, c = pos
-                x1 = c * CELL_SIZE + 2
-                y1 = r * CELL_SIZE + 2
-                x2 = x1 + CELL_SIZE - 4
-                y2 = y1 + CELL_SIZE - 4
-                draw.rectangle(
-                    [x1, y1, x2, y2],
-                    outline=COLORS["highlight"], width=3
-                )
+                draw.rectangle([x1, y1, x2, y2], fill=sq)
 
-        # ── القطع ──
-        for r in range(8):
-            for c in range(8):
                 piece = board[r][c]
-                if piece == Piece.EMPTY:
-                    continue
+                if piece != Piece.EMPTY:
+                    cx = x1 + C // 2
+                    cy = y1 + C // 2
+                    pr = 26
 
-                cx = c * CELL_SIZE + CELL_SIZE // 2
-                cy = r * CELL_SIZE + CELL_SIZE // 2
-                pr = PIECE_RADIUS
-
-                # ظل
-                draw.ellipse(
-                    [cx - pr + 3, cy - pr + 3,
-                     cx + pr + 3, cy + pr + 3],
-                    fill=COLORS["shadow"]
-                )
-
-                # لون القطعة
-                if CheckersEngine.is_light(piece):
-                    fill = COLORS["light_piece"]
-                    edge = COLORS["light_edge"]
-                else:
-                    fill = COLORS["dark_piece"]
-                    edge = COLORS["dark_edge"]
-
-                draw.ellipse(
-                    [cx - pr, cy - pr, cx + pr, cy + pr],
-                    fill=fill, outline=edge, width=2
-                )
-
-                # حلقة داخلية للجمال
-                draw.ellipse(
-                    [cx - pr + 6, cy - pr + 6,
-                     cx + pr - 6, cy + pr - 6],
-                    outline=edge, width=1
-                )
-
-                # علامة الملك 👑
-                if CheckersEngine.is_king(piece):
-                    kr = KING_RADIUS
                     draw.ellipse(
-                        [cx - kr, cy - kr, cx + kr, cy + kr],
-                        fill=COLORS["king_mark"],
-                        outline=COLORS["king_edge"], width=2
+                        [cx - pr + 3, cy - pr + 3,
+                         cx + pr + 3, cy + pr + 3],
+                        fill=(80, 60, 40)
                     )
-                    try:
-                        draw.text(
-                            (cx - 4, cy - 6), "K",
-                            fill=(0, 0, 0)
-                        )
-                    except Exception:
-                        pass
 
-        # ── إحداثيات ──
-        for i in range(8):
-            try:
-                draw.text(
-                    (3, i * CELL_SIZE + 3),
-                    str(i), fill=COLORS["coord"]
-                )
-                draw.text(
-                    (i * CELL_SIZE + CELL_SIZE // 2 - 3,
-                     size - 13),
-                    chr(65 + i), fill=COLORS["coord"]
-                )
-            except Exception:
-                pass
+                    if CheckersEngine.is_light(piece):
+                        fl = (255, 253, 245)
+                        ed = (200, 190, 175)
+                    else:
+                        fl = (50, 50, 50)
+                        ed = (30, 30, 30)
+
+                    draw.ellipse(
+                        [cx - pr, cy - pr, cx + pr, cy + pr],
+                        fill=fl, outline=ed, width=2
+                    )
+                    draw.ellipse(
+                        [cx - pr + 6, cy - pr + 6,
+                         cx + pr - 6, cy + pr - 6],
+                        outline=ed, width=1
+                    )
+
+                    if CheckersEngine.is_king(piece):
+                        kr = 10
+                        draw.ellipse(
+                            [cx - kr, cy - kr,
+                             cx + kr, cy + kr],
+                            fill=(255, 215, 0),
+                            outline=(200, 170, 0),
+                            width=2
+                        )
 
         return img
 
     @staticmethod
-    def draw_arrow(
-        img: Image.Image, move: tuple
-    ) -> Image.Image:
-        """رسم سهم الحركة المقترحة"""
+    def draw_arrow(img, move):
         if not move or len(move) < 2:
             return img
-
         draw = ImageDraw.Draw(img)
+        C = Renderer.CELL
 
         for i in range(len(move) - 1):
             sr, sc = move[i]
             er, ec = move[i + 1]
+            sx = sc * C + C // 2
+            sy = sr * C + C // 2
+            ex = ec * C + C // 2
+            ey = er * C + C // 2
 
-            sx = sc * CELL_SIZE + CELL_SIZE // 2
-            sy = sr * CELL_SIZE + CELL_SIZE // 2
-            ex = ec * CELL_SIZE + CELL_SIZE // 2
-            ey = er * CELL_SIZE + CELL_SIZE // 2
-
-            # خط السهم
             draw.line(
                 [(sx, sy), (ex, ey)],
-                fill=COLORS["arrow"], width=5
+                fill=(255, 50, 50), width=4
             )
-            # رأس السهم
             draw.ellipse(
-                [ex - 9, ey - 9, ex + 9, ey + 9],
-                fill=COLORS["arrow"]
+                [ex - 8, ey - 8, ex + 8, ey + 8],
+                fill=(255, 50, 50)
             )
 
-        # دائرة البداية
         sr, sc = move[0]
-        sx = sc * CELL_SIZE + CELL_SIZE // 2
-        sy = sr * CELL_SIZE + CELL_SIZE // 2
+        sx = sc * C + C // 2
+        sy = sr * C + C // 2
         draw.ellipse(
-            [sx - 12, sy - 12, sx + 12, sy + 12],
-            outline=COLORS["arrow_start"], width=4
+            [sx - 10, sy - 10, sx + 10, sy + 10],
+            outline=(0, 220, 0), width=4
         )
 
         return img
 
 
-# ══════════════════════════════════════════════════════
-# 6. واجهة Streamlit الكاملة
-# ══════════════════════════════════════════════════════
+# ══════════════════════════════════════════
+# 5. نظام التحكم (اضغط → حرّك)
+# ══════════════════════════════════════════
 
-def run_app():
+def init_state():
+    """تهيئة جميع متغيرات الحالة"""
+    defaults = {
+        "engine": None,
+        "selected": None,
+        "valid_moves_map": {},
+        "movable_pieces": set(),
+        "current_player": Piece.LIGHT,
+        "human_color": Piece.LIGHT,
+        "ai_color": Piece.DARK,
+        "history": [],
+        "last_move": None,
+        "message": "",
+        "ai_depth": 4,
+        "started": False,
+        "move_count": 0,
+        "undo_stack": [],
+        "mode": "pvai",
+    }
+    for key, val in defaults.items():
+        if key not in st.session_state:
+            st.session_state[key] = val
 
+    if st.session_state.engine is None:
+        st.session_state.engine = CheckersEngine()
+
+
+def compute_movable():
+    """حساب القطع القابلة للتحريك"""
+    engine = st.session_state.engine
+    player = st.session_state.current_player
+    all_moves, _ = engine.get_all_moves(player)
+    st.session_state.movable_pieces = set(
+        m[0] for m in all_moves
+    )
+
+
+def select_piece(r, c):
+    """
+    اختيار قطعة: تتحول لـ 🟢
+    وتظهر الوجهات المتاحة 🟡
+    """
+    engine = st.session_state.engine
+    player = st.session_state.current_player
+
+    all_moves, is_capture = engine.get_all_moves(player)
+    piece_moves = [m for m in all_moves if m[0] == (r, c)]
+
+    if not piece_moves:
+        st.session_state.selected = None
+        st.session_state.valid_moves_map = {}
+        st.session_state.message = "⚠️ هذه القطعة لا تملك حركات"
+        return
+
+    st.session_state.selected = (r, c)
+
+    # ربط كل وجهة نهائية بالحركة الكاملة
+    dest_map = {}
+    for move in piece_moves:
+        dest = move[-1]
+        if (dest not in dest_map
+                or len(move) > len(dest_map[dest])):
+            dest_map[dest] = move
+
+    st.session_state.valid_moves_map = dest_map
+
+    if is_capture:
+        st.session_state.message = "⚡ أكل إجباري! اختر وجهة"
+    else:
+        st.session_state.message = "🟡 اضغط على مربع أصفر للتحرك"
+
+
+def execute_human_move(dest_r, dest_c):
+    """
+    تنفيذ حركة اللاعب:
+    - القطعة تختفي من مكانها ✅
+    - تظهر في المكان الجديد ✅
+    - القطع المأكولة تختفي ✅
+    """
+    move = st.session_state.valid_moves_map.get(
+        (dest_r, dest_c)
+    )
+    if not move:
+        return
+
+    engine = st.session_state.engine
+
+    # حفظ نسخة للتراجع
+    st.session_state.undo_stack.append(
+        engine.board.copy().tolist()
+    )
+
+    is_cap = (
+        len(move) > 2
+        or (len(move) == 2
+            and abs(move[0][0] - move[1][0]) == 2)
+    )
+
+    # ── تنفيذ الحركة ──
+    engine.execute_move(move)
+
+    # ── تسجيل الحركة ──
+    path = " → ".join(f"({p[0]},{p[1]})" for p in move)
+    icon = (
+        "⚪" if CheckersEngine.is_light(
+            st.session_state.current_player
+        ) else "⚫"
+    )
+    cap_txt = " 💥أكل!" if is_cap else ""
+    st.session_state.history.append(
+        f"{icon} {path}{cap_txt}"
+    )
+    st.session_state.move_count += 1
+
+    st.session_state.last_move = move
+    st.session_state.selected = None
+    st.session_state.valid_moves_map = {}
+
+    # تبديل الدور
+    st.session_state.current_player = engine.opponent(
+        st.session_state.current_player
+    )
+    st.session_state.message = ""
+
+
+def handle_click(r, c):
+    """معالجة ضغطة على خلية"""
+    engine = st.session_state.engine
+    player = st.session_state.current_player
+
+    if (st.session_state.mode == "pvai"
+            and player != st.session_state.human_color):
+        return
+
+    selected = st.session_state.selected
+    valid_map = st.session_state.valid_moves_map
+
+    if selected is None:
+        # لا شيء مختار → حاول اختيار قطعة
+        if engine.belongs_to(engine.board[r][c], player):
+            select_piece(r, c)
+    else:
+        if (r, c) in valid_map:
+            # ضغط على وجهة صالحة → نفّذ الحركة
+            execute_human_move(r, c)
+        elif (r, c) == selected:
+            # ضغط على نفس القطعة → إلغاء الاختيار
+            st.session_state.selected = None
+            st.session_state.valid_moves_map = {}
+            st.session_state.message = ""
+        elif engine.belongs_to(engine.board[r][c], player):
+            # ضغط على قطعة أخرى → تغيير الاختيار
+            select_piece(r, c)
+        else:
+            # ضغط على مكان غير صالح → إلغاء
+            st.session_state.selected = None
+            st.session_state.valid_moves_map = {}
+            st.session_state.message = ""
+
+
+def play_ai():
+    """دور الذكاء الاصطناعي"""
+    engine = st.session_state.engine
+
+    if engine.game_over() is not None:
+        return
+
+    ai = CheckersAI(depth=st.session_state.ai_depth)
+    result = ai.find_best(engine, st.session_state.ai_color)
+
+    move = result["move"]
+    if not move:
+        return
+
+    st.session_state.undo_stack.append(
+        engine.board.copy().tolist()
+    )
+
+    is_cap = (
+        len(move) > 2
+        or (len(move) == 2
+            and abs(move[0][0] - move[1][0]) == 2)
+    )
+
+    engine.execute_move(move)
+
+    path = " → ".join(f"({p[0]},{p[1]})" for p in move)
+    icon = (
+        "⚪" if CheckersEngine.is_light(
+            st.session_state.ai_color
+        ) else "⚫"
+    )
+    cap_txt = " 💥أكل!" if is_cap else ""
+
+    st.session_state.history.append(
+        f"🤖{icon} {path}{cap_txt}"
+    )
+    st.session_state.move_count += 1
+
+    st.session_state.last_move = move
+    st.session_state.current_player = engine.opponent(
+        st.session_state.ai_color
+    )
+    st.session_state.message = (
+        f"🤖 AI لعب: {path} "
+        f"({result['time']}s, {result['nodes']} عقدة)"
+    )
+
+
+def undo_move():
+    """التراجع عن آخر حركة"""
+    if st.session_state.undo_stack:
+        old = st.session_state.undo_stack.pop()
+        st.session_state.engine = CheckersEngine(old)
+        st.session_state.selected = None
+        st.session_state.valid_moves_map = {}
+        st.session_state.last_move = None
+
+        if st.session_state.history:
+            st.session_state.history.pop()
+
+        st.session_state.current_player = (
+            CheckersEngine.opponent(
+                st.session_state.current_player
+            )
+        )
+        st.session_state.message = "↩️ تم التراجع"
+
+
+def new_game():
+    """بدء لعبة جديدة"""
+    st.session_state.engine = CheckersEngine()
+    st.session_state.selected = None
+    st.session_state.valid_moves_map = {}
+    st.session_state.movable_pieces = set()
+    st.session_state.current_player = Piece.LIGHT
+    st.session_state.history = []
+    st.session_state.last_move = None
+    st.session_state.message = "🎮 لعبة جديدة! الفاتح يبدأ"
+    st.session_state.started = True
+    st.session_state.move_count = 0
+    st.session_state.undo_stack = []
+
+
+# ══════════════════════════════════════════
+# 6. واجهة Streamlit التفاعلية
+# ══════════════════════════════════════════
+
+def main():
     st.set_page_config(
-        page_title="♟️ محرك الداما الذكي",
+        page_title="♟️ داما تفاعلية",
         page_icon="♟️",
         layout="wide",
     )
 
-    # ── CSS ──
+    # ── CSS مخصص ──
     st.markdown("""
     <style>
-    .block-container { max-width: 1100px; }
-    h1 { text-align: center; }
-    .result-box {
-        background: linear-gradient(135deg, #667eea, #764ba2);
-        color: #fff; padding: 18px; border-radius: 14px;
-        text-align: center; margin: 12px 0;
+    .block-container {max-width:1100px}
+
+    div[data-testid="stHorizontalBlock"]
+        > div[data-testid="column"] {
+        padding: 0 1px !important;
     }
-    .result-box h3 { margin: 0 0 6px; }
-    .info-box {
-        background: #f0f2f6; padding: 14px;
-        border-radius: 10px; margin: 8px 0;
-        border-left: 4px solid #667eea;
+
+    .stButton > button {
+        height: 62px !important;
+        min-height: 62px !important;
+        font-size: 28px !important;
+        padding: 0 !important;
+        border-radius: 4px !important;
+        line-height: 1 !important;
+    }
+
+    .turn-box {
+        text-align:center; font-size:1.2em;
+        padding:12px; border-radius:10px;
+        margin:8px 0; font-weight:bold;
+    }
+    .your-turn {
+        background:#d4edda; border:2px solid #28a745;
+        color:#155724;
+    }
+    .ai-turn {
+        background:#fff3cd; border:2px solid #ffc107;
+        color:#856404;
+    }
+    .capture-msg {
+        background:#f8d7da; border:2px solid #dc3545;
+        color:#721c24; text-align:center;
+        padding:8px; border-radius:8px; margin:5px 0;
+    }
+    .result-box {
+        background:linear-gradient(135deg,#667eea,#764ba2);
+        color:#fff; padding:20px; border-radius:12px;
+        text-align:center; font-size:1.5em; margin:10px 0;
     }
     </style>
     """, unsafe_allow_html=True)
 
-    st.title("♟️ محرك الداما الذكي")
-    st.caption(
-        "ذكاء اصطناعي محلي بالكامل — "
-        "Minimax + Alpha-Beta Pruning + OpenCV"
-    )
+    init_state()
 
-    # ── Session State ──
-    if "board" not in st.session_state:
-        st.session_state.board = (
-            CheckersEngine._create_initial_board().tolist()
-        )
-    if "history" not in st.session_state:
-        st.session_state.history = []
+    st.title("♟️ لعبة الداما التفاعلية")
+    st.caption("اضغط على قطعتك 🟢 ثم اضغط على الوجهة 🟡")
 
-    # ═════════ الشريط الجانبي ═════════
+    # ═══ الشريط الجانبي ═══
     with st.sidebar:
         st.header("⚙️ الإعدادات")
 
-        input_mode = st.radio(
-            "🎮 وضع الإدخال:",
-            ["✏️ إعداد يدوي", "📷 تحليل صورة"],
+        mode = st.radio(
+            "🎮 نوع اللعبة:",
+            ["🤖 ضد الذكاء الاصطناعي", "👥 لاعبَين"],
+        )
+        st.session_state.mode = (
+            "pvai" if "ذكاء" in mode else "pvp"
         )
 
-        st.divider()
+        if st.session_state.mode == "pvai":
+            color = st.radio(
+                "♟️ لونك:",
+                ["⚪ الفاتح (أعلى)", "⚫ الداكن (أسفل)"],
+            )
+            st.session_state.human_color = (
+                Piece.LIGHT if "الفاتح" in color
+                else Piece.DARK
+            )
+            st.session_state.ai_color = (
+                CheckersEngine.opponent(
+                    st.session_state.human_color
+                )
+            )
 
-        player_label = st.radio(
-            "♟️ أنت تلعب بـ:",
-            ["⚪ الفاتح (لأعلى)", "⚫ الداكن (لأسفل)"],
-        )
-        my_player = (
-            Piece.LIGHT if "الفاتح" in player_label
-            else Piece.DARK
-        )
-
-        st.divider()
-
-        difficulty = st.select_slider(
-            "🧠 مستوى الذكاء:",
-            ["مبتدئ", "متوسط", "خبير", "بطل"],
-            value="متوسط",
-        )
-        depth_map = {
-            "مبتدئ": 2, "متوسط": 4,
-            "خبير": 6,  "بطل": 8
-        }
-        ai_depth = depth_map[difficulty]
+            diff = st.select_slider(
+                "🧠 الصعوبة:",
+                ["سهل", "متوسط", "صعب", "خبير"],
+                value="متوسط",
+            )
+            depth_map = {
+                "سهل": 2, "متوسط": 4,
+                "صعب": 6, "خبير": 8,
+            }
+            st.session_state.ai_depth = depth_map[diff]
 
         st.divider()
 
         c1, c2 = st.columns(2)
         with c1:
-            if st.button("🔄 رقعة جديدة", use_container_width=True):
-                st.session_state.board = (
-                    CheckersEngine._create_initial_board().tolist()
-                )
-                st.session_state.history = []
+            if st.button(
+                "🆕 جديدة",
+                use_container_width=True,
+                type="primary",
+            ):
+                new_game()
                 st.rerun()
         with c2:
-            if st.button("🗑️ مسح الرقعة", use_container_width=True):
-                st.session_state.board = (
-                    np.zeros((8, 8), dtype=int).tolist()
-                )
-                st.session_state.history = []
+            if st.button(
+                "↩️ تراجع",
+                use_container_width=True,
+            ):
+                undo_move()
                 st.rerun()
 
         st.divider()
 
         # إحصائيات
-        board_arr = np.array(st.session_state.board, dtype=np.int8)
-        engine_tmp = CheckersEngine(board_arr)
-        light_info = engine_tmp.count_pieces(Piece.LIGHT)
-        dark_info  = engine_tmp.count_pieces(Piece.DARK)
+        engine = st.session_state.engine
+        li = engine.count_pieces(Piece.LIGHT)
+        di = engine.count_pieces(Piece.DARK)
 
-        st.markdown("### 📊 القطع على الرقعة")
-        lc, dc = st.columns(2)
-        with lc:
-            st.metric(
-                "⚪ فاتحة",
-                light_info["total"],
-                delta=(
-                    f"+{light_info['kings']} ملك"
-                    if light_info["kings"] else None
-                ),
+        st.markdown("### 📊 القطع")
+        mc1, mc2 = st.columns(2)
+        with mc1:
+            lbl = "⚪"
+            if st.session_state.mode == "pvai":
+                lbl += (
+                    " أنت"
+                    if st.session_state.human_color
+                       == Piece.LIGHT
+                    else " AI"
+                )
+            kd = (
+                f"👑×{li['kings']}"
+                if li["kings"] else None
             )
-        with dc:
-            st.metric(
-                "⚫ داكنة",
-                dark_info["total"],
-                delta=(
-                    f"+{dark_info['kings']} ملك"
-                    if dark_info["kings"] else None
-                ),
+            st.metric(lbl, li["total"], delta=kd)
+        with mc2:
+            lbl = "⚫"
+            if st.session_state.mode == "pvai":
+                lbl += (
+                    " أنت"
+                    if st.session_state.human_color
+                       == Piece.DARK
+                    else " AI"
+                )
+            kd = (
+                f"👑×{di['kings']}"
+                if di["kings"] else None
             )
+            st.metric(lbl, di["total"], delta=kd)
 
-    # ═════════ المحتوى الرئيسي ═════════
-    col_board, col_ai = st.columns([1.2, 1])
+        st.metric("🔢 الحركات", st.session_state.move_count)
 
-    # ─────── العمود الأيسر: الرقعة ───────
-    with col_board:
-        st.subheader("📋 الرقعة")
-
-        if "صورة" in input_mode:
-            # ──── وضع الصورة ────
-            uploaded = st.file_uploader(
-                "📸 ارفع صورة الرقعة",
-                type=["jpg", "png", "jpeg"],
-            )
-
-            if uploaded:
-                pil_img = Image.open(uploaded).convert("RGB")
-                cropped = BoardVision.auto_crop(pil_img)
-
-                ca, cb = st.columns(2)
-                with ca:
-                    st.image(
-                        pil_img, caption="الأصلية",
-                        use_container_width=True
-                    )
-                with cb:
-                    st.image(
-                        cropped, caption="بعد الاقتصاص",
-                        use_container_width=True
-                    )
-
-                st.markdown("**ضبط حساسية الألوان:**")
-                tc1, tc2 = st.columns(2)
-                with tc1:
-                    lt = st.slider(
-                        "عتبة الفاتح", 120, 220, 160
-                    )
-                with tc2:
-                    dt = st.slider(
-                        "عتبة الداكن", 40, 140, 100
-                    )
-
-                if st.button("🔍 تحليل الصورة", type="primary"):
-                    with st.spinner("جاري التحليل..."):
-                        board, dbg = BoardVision.analyze(
-                            cropped, lt, dt
-                        )
-                        st.session_state.board = board.tolist()
-                        st.success("✅ تم تحليل الصورة!")
-
-                        with st.expander("🔬 تفاصيل التحليل"):
-                            for d in dbg:
-                                if d["detected"] != 0:
-                                    name = (
-                                        "⚪ فاتحة"
-                                        if d["detected"] == 1
-                                        else "⚫ داكنة"
-                                    )
-                                    st.write(
-                                        f"({d['row']},{d['col']}): "
-                                        f"{name} — سطوع "
-                                        f"{d['brightness']} — "
-                                        f"تباين {d['variance']}"
-                                    )
-                        st.rerun()
-
-        else:
-            # ──── وضع يدوي ────
-            st.markdown("**اختر قطعة ثم اضغط مربعاً:**")
-
-            piece_options = {
-                "⬜ فارغ":       int(Piece.EMPTY),
-                "⚪ فاتح":       int(Piece.LIGHT),
-                "⚫ داكن":       int(Piece.DARK),
-                "👑⚪ ملك فاتح": int(Piece.LIGHT_KING),
-                "👑⚫ ملك داكن": int(Piece.DARK_KING),
-            }
-
-            selected = st.radio(
-                "القطعة:", list(piece_options.keys()),
-                horizontal=True, label_visibility="collapsed",
-            )
-            sel_val = piece_options[selected]
-
-            symbols = {
-                int(Piece.EMPTY):      "·",
-                int(Piece.LIGHT):      "⚪",
-                int(Piece.DARK):       "⚫",
-                int(Piece.LIGHT_KING): "👑W",
-                int(Piece.DARK_KING):  "👑B",
-            }
-
-            board_arr = np.array(st.session_state.board)
-
-            for r in range(8):
-                cols = st.columns(8)
-                for c in range(8):
-                    with cols[c]:
-                        is_playable = (r + c) % 2 != 0
-                        p = int(board_arr[r][c])
-                        sym = symbols.get(p, "·")
-                        if not is_playable:
-                            sym = ""
-
-                        if st.button(
-                            sym,
-                            key=f"c_{r}_{c}",
-                            use_container_width=True,
-                            disabled=not is_playable,
-                        ):
-                            st.session_state.board[r][c] = sel_val
-                            st.rerun()
-
-        # ── رسم الرقعة البصرية ──
-        rendered = BoardRenderer.render(
-            np.array(st.session_state.board, dtype=np.int8)
-        )
-        st.image(
-            rendered,
-            caption="🎨 عرض الرقعة",
-            use_container_width=True,
-        )
-
-    # ─────── العمود الأيمن: الذكاء ───────
-    with col_ai:
-        st.subheader("🤖 تحليل AI")
-
-        if st.button(
-            "🚀 احسب أفضل حركة",
-            use_container_width=True,
-            type="primary",
-        ):
-            engine = CheckersEngine(st.session_state.board)
-            my_count = engine.count_pieces(my_player)["total"]
-
-            if my_count == 0:
-                st.error("❌ لا توجد قطع لك على الرقعة!")
-            else:
-                moves, is_jump = engine.get_all_moves(my_player)
-
-                if not moves:
-                    st.warning("⚠️ لا توجد حركات متاحة لك!")
-                else:
-                    with st.spinner(
-                        f"🧠 يفكر بعمق {ai_depth}..."
-                    ):
-                        ai = CheckersAI(max_depth=ai_depth)
-                        result = ai.find_best_move(engine, my_player)
-
-                    move = result["move"]
-
-                    if move:
-                        # ── عرض النتيجة ──
-                        start = move[0]
-                        end   = move[-1]
-                        steps = len(move) - 1
-
-                        move_type = (
-                            "أكل متعدد! 🔥"
-                            if steps > 1 and is_jump
-                            else "أكل ⚡"
-                            if is_jump
-                            else "حركة عادية"
-                        )
-
-                        st.markdown(f"""
-                        <div class="result-box">
-                            <h3>✅ أفضل حركة — {move_type}</h3>
-                            <p style="font-size:1.4em;">
-                                ({start[0]},{start[1]}) ➜
-                                ({end[0]},{end[1]})
-                            </p>
-                        </div>
-                        """, unsafe_allow_html=True)
-
-                        # مقاييس
-                        m1, m2, m3 = st.columns(3)
-                        with m1:
-                            st.metric("📊 التقييم", result["score"])
-                        with m2:
-                            st.metric(
-                                "🔢 العقد",
-                                f"{result['nodes']:,}"
-                            )
-                        with m3:
-                            st.metric(
-                                "⏱ الوقت",
-                                f"{result['time']}s"
-                            )
-
-                        # تفاصيل الأكل المتعدد
-                        if steps > 1:
-                            st.markdown(
-                                f'<div class="info-box">'
-                                f"🔥 سلسلة أكل من {steps} "
-                                f"خطوات!</div>",
-                                unsafe_allow_html=True,
-                            )
-                            path = " ➜ ".join(
-                                f"({p[0]},{p[1]})" for p in move
-                            )
-                            st.code(path)
-
-                        if is_jump:
-                            st.info("⚠️ الأكل إجباري بقوانين الداما!")
-
-                        # ── رسم الحركة ──
-                        result_img = BoardRenderer.render(
-                            np.array(st.session_state.board,
-                                     dtype=np.int8),
-                            highlight=list(move),
-                        )
-                        result_img = BoardRenderer.draw_arrow(
-                            result_img, move
-                        )
-                        st.image(
-                            result_img,
-                            caption="🎯 الحركة المقترحة",
-                            use_container_width=True,
-                        )
-
-                        # ── زر التنفيذ ──
-                        if st.button(
-                            "✅ نفّذ هذه الحركة",
-                            use_container_width=True,
-                        ):
-                            eng = CheckersEngine(
-                                st.session_state.board
-                            )
-                            eng.execute_move(move)
-                            st.session_state.board = (
-                                eng.board.tolist()
-                            )
-                            st.session_state.history.append(
-                                " ➜ ".join(
-                                    f"({p[0]},{p[1]})"
-                                    for p in move
-                                )
-                            )
-                            st.rerun()
-
-                        # ── جميع الحركات ──
-                        with st.expander(
-                            f"📋 كل الحركات ({len(moves)})"
-                        ):
-                            for i, m in enumerate(moves, 1):
-                                is_best = m == move
-                                icon = "⭐" if is_best else f"{i}."
-                                path = " ➜ ".join(
-                                    f"({p[0]},{p[1]})"
-                                    for p in m
-                                )
-                                st.write(f"{icon} {path}")
-
-                    else:
-                        st.error("❌ لم يُعثر على حركة!")
-
-        # ── حالة اللعبة ──
-        engine_check = CheckersEngine(st.session_state.board)
-        game_state = engine_check.is_game_over()
-
-        if game_state is not None:
-            if game_state == Piece.LIGHT:
-                st.balloons()
-                st.success("🏆 فاز الفاتح!")
-            elif game_state == Piece.DARK:
-                st.balloons()
-                st.success("🏆 فاز الداكن!")
-            else:
-                st.warning("🤝 تعادل!")
-
-        # ── سجل الحركات ──
+        # السجل
         if st.session_state.history:
+            st.divider()
             with st.expander(
                 f"📜 السجل ({len(st.session_state.history)})"
             ):
                 for i, h in enumerate(
                     st.session_state.history, 1
                 ):
-                    player_icon = (
-                        "⚪" if i % 2 != 0 else "⚫"
+                    st.text(f"{i}. {h}")
+
+        st.divider()
+        st.markdown("""
+        **🎮 طريقة اللعب:**
+        1. اضغط على قطعتك → 🟢
+        2. اضغط على 🟡 للتحرك
+        3. القطعة تنتقل تلقائياً
+        4. المأكولة تختفي فوراً
+        """)
+
+    # ═══ المحتوى الرئيسي ═══
+
+    # ── فحص نهاية اللعبة ──
+    game_result = engine.game_over()
+    if game_result is not None:
+        if game_result == -1:
+            st.markdown(
+                '<div class="result-box">🤝 تعادل!</div>',
+                unsafe_allow_html=True,
+            )
+        elif (st.session_state.mode == "pvp"
+              or game_result == st.session_state.human_color):
+            st.balloons()
+            winner = (
+                "⚪ الفاتح" if game_result == Piece.LIGHT
+                else "⚫ الداكن"
+            )
+            st.markdown(
+                f'<div class="result-box">'
+                f"🏆 فاز {winner}!</div>",
+                unsafe_allow_html=True,
+            )
+        else:
+            st.markdown(
+                '<div class="result-box">'
+                "😞 خسرت! حاول مرة أخرى</div>",
+                unsafe_allow_html=True,
+            )
+
+        if st.button("🔄 العب مرة أخرى", type="primary"):
+            new_game()
+            st.rerun()
+        return
+
+    # ── دور الذكاء الاصطناعي ──
+    is_ai_turn = (
+        st.session_state.mode == "pvai"
+        and st.session_state.current_player
+            == st.session_state.ai_color
+        and st.session_state.started
+    )
+
+    if is_ai_turn:
+        with st.spinner("🤖 الذكاء الاصطناعي يفكر..."):
+            play_ai()
+        st.rerun()
+
+    # ── حساب القطع القابلة للتحريك ──
+    compute_movable()
+
+    # ── مؤشر الدور ──
+    current_emoji = (
+        "⚪" if st.session_state.current_player
+              == Piece.LIGHT
+        else "⚫"
+    )
+
+    is_human = (
+        st.session_state.mode == "pvp"
+        or st.session_state.current_player
+           == st.session_state.human_color
+    )
+
+    if is_human:
+        if st.session_state.selected:
+            txt = (
+                f"{current_emoji} اختر المربع الأصفر"
+                f" 🟡 للتحرك — أو اضغط قطعة أخرى"
+            )
+        else:
+            txt = (
+                f"{current_emoji} دورك!"
+                f" اضغط على إحدى قطعك لاختيارها"
+            )
+        st.markdown(
+            f'<div class="turn-box your-turn">{txt}</div>',
+            unsafe_allow_html=True,
+        )
+
+    if st.session_state.message:
+        st.info(st.session_state.message)
+
+    # ── فحص الأكل الإجباري ──
+    _, is_forced_capture = engine.get_all_moves(
+        st.session_state.current_player
+    )
+    if is_forced_capture and st.session_state.selected is None:
+        st.markdown(
+            '<div class="capture-msg">'
+            "⚡ أكل إجباري! يجب عليك الأكل</div>",
+            unsafe_allow_html=True,
+        )
+
+    # ═══════════════════════════════
+    #  🎮 الرقعة التفاعلية
+    # ═══════════════════════════════
+
+    col_grid, col_visual = st.columns([1.4, 1])
+
+    with col_grid:
+        board = engine.board
+        selected = st.session_state.selected
+        valid_dests = set(
+            st.session_state.valid_moves_map.keys()
+        )
+        player = st.session_state.current_player
+        movable = st.session_state.movable_pieces
+
+        for r in range(8):
+            cols = st.columns(8)
+            for c in range(8):
+                with cols[c]:
+                    piece = int(board[r][c])
+                    playable = (r + c) % 2 != 0
+                    is_sel = selected == (r, c)
+                    is_dest = (r, c) in valid_dests
+
+                    # ── تحديد الرمز ──
+                    if is_sel:
+                        label = "🟢"
+                    elif is_dest:
+                        label = "🟡"
+                    elif piece == Piece.LIGHT:
+                        label = "⚪"
+                    elif piece == Piece.DARK:
+                        label = "⚫"
+                    elif piece == Piece.LIGHT_KING:
+                        label = "👑"
+                    elif piece == Piece.DARK_KING:
+                        label = "♛"
+                    elif playable:
+                        label = "▪"
+                    else:
+                        label = "▫"
+
+                    # ── هل يمكن الضغط؟ ──
+                    can_click = False
+
+                    if is_human and playable:
+                        if selected is None:
+                            can_click = (
+                                (r, c) in movable
+                            )
+                        else:
+                            can_click = (
+                                is_dest
+                                or is_sel
+                                or (r, c) in movable
+                            )
+
+                    # ── الزر ──
+                    st.button(
+                        label,
+                        key=f"b{r}{c}",
+                        use_container_width=True,
+                        disabled=not can_click,
+                        on_click=handle_click,
+                        args=(r, c),
                     )
-                    st.write(f"{i}. {player_icon} {h}")
+
+    # ── العرض البصري ──
+    with col_visual:
+        st.markdown("##### 🎨 العرض البصري")
+
+        vd = (
+            set(st.session_state.valid_moves_map.keys())
+            if st.session_state.valid_moves_map
+            else None
+        )
+        visual = Renderer.render(
+            board,
+            selected=st.session_state.selected,
+            valid_dests=vd,
+            last_move=st.session_state.last_move,
+        )
+
+        if st.session_state.last_move:
+            visual = Renderer.draw_arrow(
+                visual, st.session_state.last_move
+            )
+
+        st.image(visual, use_container_width=True)
+
+        # دليل الرموز
+        st.markdown("""
+        | الرمز | المعنى |
+        |:-----:|:------:|
+        | 🟢 | قطعتك المختارة |
+        | 🟡 | حركة متاحة (اضغط!) |
+        | ⚪ | قطعة فاتحة |
+        | ⚫ | قطعة داكنة |
+        | 👑 | ملك فاتح |
+        | ♛ | ملك داكن |
+        """)
+
+        # زر اقتراح
+        if (is_human
+            and st.session_state.mode == "pvai"
+            and st.session_state.started):
+            if st.button(
+                "💡 ساعدني!",
+                use_container_width=True,
+            ):
+                with st.spinner("🧠 جاري التحليل..."):
+                    ai = CheckersAI(
+                        depth=st.session_state.ai_depth
+                    )
+                    res = ai.find_best(
+                        engine,
+                        st.session_state.human_color,
+                    )
+                    if res["move"]:
+                        hint = Renderer.render(board)
+                        hint = Renderer.draw_arrow(
+                            hint, res["move"]
+                        )
+                        st.image(
+                            hint,
+                            caption=(
+                                f"💡 اقتراح "
+                                f"(تقييم: {res['score']})"
+                            ),
+                            use_container_width=True,
+                        )
 
     # ── Footer ──
     st.divider()
     st.markdown(
         '<p style="text-align:center;color:#999;'
-        'font-size:0.85em;">'
-        "♟️ محرك الداما المستقل v2.0 — "
-        "Python + OpenCV + Minimax — "
-        "يعمل بالكامل بدون إنترنت أو APIs"
+        'font-size:0.8em;">'
+        "♟️ داما تفاعلية v3.0 — "
+        "Minimax + Alpha-Beta — "
+        "بدون إنترنت أو APIs"
         "</p>",
         unsafe_allow_html=True,
     )
 
 
-# ══════════════════════════════════════════════════════
-# 7. التشغيل
-# ══════════════════════════════════════════════════════
-
 if __name__ == "__main__":
-    run_app()
+    main()
