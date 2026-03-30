@@ -1,1159 +1,1387 @@
 #!/usr/bin/env python3
 """
-╔════════════════════════════════════════════╗
-║   ♟️ لعبة الداما التفاعلية v3.0           ║
-║   اضغط على القطعة → اضغط على الوجهة      ║
-║   Minimax + Alpha-Beta AI                  ║
-╚════════════════════════════════════════════╝
+╔═══════════════════════════════════════════════════╗
+║        ♟️ مساعد الداما الذكي v5.0                 ║
+║   حمّل صورة أو أدخل الرقعة → يريك كيف تفوز      ║
+║   ليس لعبة — بل محلل شرس يضمن لك الفوز          ║
+╚═══════════════════════════════════════════════════╝
 """
 
 import streamlit as st
 import numpy as np
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageFont
 import time
 from enum import IntEnum
 
-
-# ══════════════════════════════════════════
-# 1. ثوابت اللعبة
-# ══════════════════════════════════════════
-
-class Piece(IntEnum):
-    EMPTY = 0
-    LIGHT = 1
-    DARK = 2
-    LIGHT_KING = 3
-    DARK_KING = 4
+try:
+    import cv2
+    HAS_CV2 = True
+except ImportError:
+    HAS_CV2 = False
 
 
 # ══════════════════════════════════════════
-# 2. محرك اللعبة الكامل
+# ثوابت
 # ══════════════════════════════════════════
 
-class CheckersEngine:
-    """
-    محرك داما كامل القواعد:
-    - حركات عادية + أكل + أكل متعدد
-    - أكل إجباري + ملوك (ضامة)
-    - ترقية تلقائية عند الحافة
-    """
+class P(IntEnum):
+    E = 0       # فارغ
+    L = 1       # فاتح
+    D = 2       # داكن
+    LK = 3      # ملك فاتح
+    DK = 4      # ملك داكن
+
+CELL = 80
+BOARD_PX = CELL * 8
+
+# جدول القيمة الموضعية لكل خلية
+POS_VALUE = np.array([
+    [0, 4, 0, 4, 0, 4, 0, 4],
+    [4, 0, 3, 0, 3, 0, 3, 0],
+    [0, 3, 0, 5, 0, 5, 0, 3],
+    [3, 0, 5, 0, 6, 0, 5, 0],
+    [0, 5, 0, 6, 0, 5, 0, 3],
+    [3, 0, 5, 0, 5, 0, 3, 0],
+    [0, 3, 0, 3, 0, 3, 0, 4],
+    [4, 0, 4, 0, 4, 0, 4, 0],
+], dtype=np.float32)
+
+
+# ══════════════════════════════════════════
+# محرك القواعد الكامل
+# ══════════════════════════════════════════
+
+class Engine:
 
     def __init__(self, board=None):
         if board is not None:
             self.board = np.array(board, dtype=np.int8)
         else:
-            self.board = self._initial_board()
+            self.board = self._init()
 
     @staticmethod
-    def _initial_board():
+    def _init():
         b = np.zeros((8, 8), dtype=np.int8)
         for r in range(8):
             for c in range(8):
                 if (r + c) % 2 != 0:
                     if r < 3:
-                        b[r][c] = Piece.DARK
+                        b[r][c] = P.D
                     elif r > 4:
-                        b[r][c] = Piece.LIGHT
+                        b[r][c] = P.L
         return b
 
     def copy(self):
-        e = CheckersEngine.__new__(CheckersEngine)
+        e = Engine.__new__(Engine)
         e.board = self.board.copy()
         return e
 
-    # ── تصنيف القطع ──
-
     @staticmethod
     def is_light(p):
-        return p in (Piece.LIGHT, Piece.LIGHT_KING)
+        return p in (P.L, P.LK)
 
     @staticmethod
     def is_dark(p):
-        return p in (Piece.DARK, Piece.DARK_KING)
+        return p in (P.D, P.DK)
 
     @staticmethod
     def is_king(p):
-        return p in (Piece.LIGHT_KING, Piece.DARK_KING)
+        return p in (P.LK, P.DK)
 
     @staticmethod
-    def belongs_to(piece, player):
-        if player in (Piece.LIGHT, Piece.LIGHT_KING):
-            return piece in (Piece.LIGHT, Piece.LIGHT_KING)
-        return piece in (Piece.DARK, Piece.DARK_KING)
+    def owns(piece, player):
+        if player in (P.L, P.LK):
+            return piece in (P.L, P.LK)
+        return piece in (P.D, P.DK)
 
     @staticmethod
-    def is_enemy(piece, player):
-        if piece == Piece.EMPTY:
+    def enemy(piece, player):
+        if piece == P.E:
             return False
-        if player in (Piece.LIGHT, Piece.LIGHT_KING):
-            return piece in (Piece.DARK, Piece.DARK_KING)
-        return piece in (Piece.LIGHT, Piece.LIGHT_KING)
+        if player in (P.L, P.LK):
+            return piece in (P.D, P.DK)
+        return piece in (P.L, P.LK)
 
     @staticmethod
-    def opponent(player):
-        if player in (Piece.LIGHT, Piece.LIGHT_KING):
-            return Piece.DARK
-        return Piece.LIGHT
+    def opp(player):
+        return P.D if player in (P.L, P.LK) else P.L
 
     @staticmethod
-    def directions(piece):
-        if piece == Piece.LIGHT:
+    def dirs(piece):
+        if piece == P.L:
             return [(-1, -1), (-1, 1)]
-        if piece == Piece.DARK:
+        if piece == P.D:
             return [(1, -1), (1, 1)]
-        if piece in (Piece.LIGHT_KING, Piece.DARK_KING):
+        if piece in (P.LK, P.DK):
             return [(-1, -1), (-1, 1), (1, -1), (1, 1)]
         return []
 
-    # ── الحركات البسيطة ──
-
-    def _simple_moves(self, r, c):
+    def _simple(self, r, c):
         p = self.board[r][c]
-        moves = []
-        for dr, dc in self.directions(p):
+        out = []
+        for dr, dc in self.dirs(p):
             nr, nc = r + dr, c + dc
             if 0 <= nr < 8 and 0 <= nc < 8:
-                if self.board[nr][nc] == Piece.EMPTY:
-                    moves.append(((r, c), (nr, nc)))
-        return moves
+                if self.board[nr][nc] == P.E:
+                    out.append(((r, c), (nr, nc)))
+        return out
 
-    # ── سلاسل الأكل (مع أكل متعدد) ──
-
-    def _jump_chains(self, r, c, board=None, eaten=None):
-        if board is None:
-            board = self.board
+    def _jumps(self, r, c, bd=None, eaten=None):
+        if bd is None:
+            bd = self.board
         if eaten is None:
             eaten = frozenset()
-
-        p = board[r][c]
+        p = bd[r][c]
         chains = []
-
-        for dr, dc in self.directions(p):
+        for dr, dc in self.dirs(p):
             mr, mc = r + dr, c + dc
             nr, nc = r + 2 * dr, c + 2 * dc
-
             if not (0 <= nr < 8 and 0 <= nc < 8):
                 continue
-            if board[nr][nc] != Piece.EMPTY:
+            if bd[nr][nc] != P.E:
                 continue
-            if not self.is_enemy(board[mr][mc], p):
+            if not self.enemy(bd[mr][mc], p):
                 continue
             if (mr, mc) in eaten:
                 continue
 
-            nb = board.copy()
+            nb = bd.copy()
             nb[nr][nc] = p
-            nb[r][c] = Piece.EMPTY
-            nb[mr][mc] = Piece.EMPTY
+            nb[r][c] = P.E
+            nb[mr][mc] = P.E
 
-            promoted = False
-            if nr == 0 and p == Piece.LIGHT:
-                nb[nr][nc] = Piece.LIGHT_KING
-                promoted = True
-            elif nr == 7 and p == Piece.DARK:
-                nb[nr][nc] = Piece.DARK_KING
-                promoted = True
+            promo = False
+            if nr == 0 and p == P.L:
+                nb[nr][nc] = P.LK
+                promo = True
+            elif nr == 7 and p == P.D:
+                nb[nr][nc] = P.DK
+                promo = True
 
             ne = eaten | {(mr, mc)}
+            fur = [] if promo else self._jumps(nr, nc, nb, ne)
 
-            further = []
-            if not promoted:
-                further = self._jump_chains(nr, nc, nb, ne)
-
-            if further:
-                for ch in further:
+            if fur:
+                for ch in fur:
                     chains.append(((r, c),) + ch)
             else:
                 chains.append(((r, c), (nr, nc)))
-
         return chains
 
-    # ── جميع الحركات (مع الأكل الإجباري) ──
-
-    def get_all_moves(self, player):
-        """يُرجع (قائمة_الحركات, هل_هي_أكل)"""
-        jumps = []
-        simple = []
-
+    def get_moves(self, player):
+        jumps, simple = [], []
         for r in range(8):
             for c in range(8):
-                if self.belongs_to(self.board[r][c], player):
-                    jumps.extend(self._jump_chains(r, c))
-                    simple.extend(self._simple_moves(r, c))
-
-        # الأكل الإجباري
+                if self.owns(self.board[r][c], player):
+                    jumps.extend(self._jumps(r, c))
+                    simple.extend(self._simple(r, c))
         if jumps:
-            max_len = max(len(j) for j in jumps)
-            longest = [j for j in jumps if len(j) == max_len]
-            return longest, True
-
+            mx = max(len(j) for j in jumps)
+            return [j for j in jumps if len(j) == mx], True
         return simple, False
 
-    # ── تنفيذ حركة ──
-
-    def execute_move(self, move):
-        """
-        تنفيذ الحركة:
-        - القطعة تختفي من مكانها الأصلي
-        - تظهر في المكان الجديد
-        - القطع المأكولة تختفي
-        """
-        if len(move) < 2:
-            return
-
+    def do_move(self, move):
         piece = self.board[move[0][0]][move[0][1]]
-
-        # ── مسح الموقع الأصلي (القطعة تختفي) ──
-        self.board[move[0][0]][move[0][1]] = Piece.EMPTY
-
-        # ── معالجة كل خطوة في السلسلة ──
+        self.board[move[0][0]][move[0][1]] = P.E
         for i in range(len(move) - 1):
             sr, sc = move[i]
             er, ec = move[i + 1]
             dr, dc = er - sr, ec - sc
-
-            # إذا كانت قفزة (أكل)
             if abs(dr) == 2 and abs(dc) == 2:
-                mr = sr + dr // 2
-                mc = sc + dc // 2
-                # ── القطعة المأكولة تختفي ──
-                self.board[mr][mc] = Piece.EMPTY
-
-        # ── القطعة تظهر في الموقع الجديد ──
+                self.board[sr + dr // 2][sc + dc // 2] = P.E
         fr, fc = move[-1]
         self.board[fr][fc] = piece
+        if fr == 0 and piece == P.L:
+            self.board[fr][fc] = P.LK
+        if fr == 7 and piece == P.D:
+            self.board[fr][fc] = P.DK
 
-        # ── ترقية للملك ──
-        if fr == 0 and piece == Piece.LIGHT:
-            self.board[fr][fc] = Piece.LIGHT_KING
-        elif fr == 7 and piece == Piece.DARK:
-            self.board[fr][fc] = Piece.DARK_KING
-
-    # ── إحصائيات ──
-
-    def count_pieces(self, player):
+    def count(self, player):
         n = k = 0
         for r in range(8):
             for c in range(8):
                 p = self.board[r][c]
-                if self.belongs_to(p, player):
+                if self.owns(p, player):
                     if self.is_king(p):
                         k += 1
                     else:
                         n += 1
-        return {"normal": n, "kings": k, "total": n + k}
+        return n, k
 
     def game_over(self):
-        """None = مستمرة, LIGHT/DARK = فائز, -1 = تعادل"""
-        lt = self.count_pieces(Piece.LIGHT)["total"]
-        dt = self.count_pieces(Piece.DARK)["total"]
-
-        if lt == 0:
-            return Piece.DARK
-        if dt == 0:
-            return Piece.LIGHT
-
-        lm, _ = self.get_all_moves(Piece.LIGHT)
-        dm, _ = self.get_all_moves(Piece.DARK)
-
+        ln, lk = self.count(P.L)
+        dn, dk = self.count(P.D)
+        if ln + lk == 0:
+            return P.D
+        if dn + dk == 0:
+            return P.L
+        lm, _ = self.get_moves(P.L)
+        dm, _ = self.get_moves(P.D)
         if not lm and not dm:
             return -1
         if not lm:
-            return Piece.DARK
+            return P.D
         if not dm:
-            return Piece.LIGHT
+            return P.L
         return None
 
 
 # ══════════════════════════════════════════
-# 3. محرك الذكاء الاصطناعي
+# الذكاء الاصطناعي الشرس
 # ══════════════════════════════════════════
 
-class CheckersAI:
-    """Minimax + Alpha-Beta Pruning"""
+class BrutalAI:
+    """
+    محلل شرس بـ 10 عوامل تقييم:
+    1. المادة (قطع + ملوك بأوزان عالية)
+    2. الموقع (جدول POS_VALUE)
+    3. التقدم نحو الترقية
+    4. السيطرة على المركز
+    5. حماية الصف الخلفي
+    6. حماية الأجناب
+    7. ترابط القطع
+    8. حرية الحركة
+    9. تهديد الأكل
+    10. استراتيجية نهاية اللعبة
+    """
 
-    def __init__(self, depth=4):
+    def __init__(self, depth=6):
         self.depth = depth
         self.nodes = 0
 
-    def evaluate(self, engine, player):
+    def evaluate(self, eng, player):
         score = 0.0
-        opp = engine.opponent(player)
+        opp = eng.opp(player)
+        total = 0
+
+        my_n, my_k = eng.count(player)
+        op_n, op_k = eng.count(opp)
+        my_total = my_n + my_k
+        op_total = op_n + op_k
+        total = my_total + op_total
+
+        # هل نحن في نهاية اللعبة؟
+        endgame = total <= 10
 
         for r in range(8):
             for c in range(8):
-                p = engine.board[r][c]
-                if p == Piece.EMPTY:
+                p = eng.board[r][c]
+                if p == P.E:
                     continue
 
-                val = 25.0 if engine.is_king(p) else 10.0
+                val = 0.0
 
-                if p == Piece.LIGHT:
-                    val += (7 - r) * 0.7
-                elif p == Piece.DARK:
-                    val += r * 0.7
+                # 1. المادة
+                if eng.is_king(p):
+                    val = 350.0 if endgame else 300.0
+                else:
+                    val = 100.0
 
-                cd = abs(r - 3.5) + abs(c - 3.5)
-                val += (5.0 - cd) * 0.3
+                # 2. الموقع
+                val += POS_VALUE[r][c] * 4
 
+                # 3. التقدم نحو الترقية
+                if not eng.is_king(p):
+                    if p == P.L:
+                        progress = 7 - r
+                        val += progress * 8
+                        if r <= 1:
+                            val += 25  # قريب جداً من الترقية
+                    elif p == P.D:
+                        progress = r
+                        val += progress * 8
+                        if r >= 6:
+                            val += 25
+
+                # 4. المركز
+                if 2 <= r <= 5 and 2 <= c <= 5:
+                    val += 10
+                    if 3 <= r <= 4 and 3 <= c <= 4:
+                        val += 8
+
+                # 5. الصف الخلفي
+                if not eng.is_king(p):
+                    if p == P.L and r == 7:
+                        val += 15
+                    elif p == P.D and r == 0:
+                        val += 15
+
+                # 6. الأجناب
                 if c == 0 or c == 7:
-                    val += 0.5
+                    val += 4
 
-                if engine.belongs_to(p, player):
+                # 7. الترابط
+                allies = 0
+                for dr2, dc2 in [(-1, -1), (-1, 1),
+                                 (1, -1), (1, 1)]:
+                    ar, ac = r + dr2, c + dc2
+                    if 0 <= ar < 8 and 0 <= ac < 8:
+                        if eng.owns(eng.board[ar][ac], p):
+                            allies += 1
+                val += allies * 5
+
+                # 8. هل محمية من الأكل؟
+                safe = True
+                for dr2, dc2 in [(-1, -1), (-1, 1),
+                                 (1, -1), (1, 1)]:
+                    ar, ac = r + dr2, c + dc2
+                    br, bc = r - dr2, c - dc2
+                    if (0 <= ar < 8 and 0 <= ac < 8
+                            and 0 <= br < 8 and 0 <= bc < 8):
+                        if (eng.enemy(eng.board[ar][ac], p)
+                                and eng.board[br][bc] == P.E):
+                            safe = False
+                            break
+                if safe:
+                    val += 6
+
+                if eng.owns(p, player):
                     score += val
                 else:
                     score -= val
 
-        my_m, _ = engine.get_all_moves(player)
-        op_m, _ = engine.get_all_moves(opp)
-        score += len(my_m) * 0.3 - len(op_m) * 0.3
+        # 9. حرية الحركة + تهديد
+        my_m, my_cap = eng.get_moves(player)
+        op_m, op_cap = eng.get_moves(opp)
+        score += len(my_m) * 6
+        score -= len(op_m) * 6
+        if my_cap:
+            score += 30
+        if op_cap:
+            score -= 30
+
+        # 10. استراتيجية نهاية اللعبة
+        if endgame:
+            my_mat = my_n + my_k * 3
+            op_mat = op_n + op_k * 3
+            if my_mat > op_mat:
+                score += (my_mat - op_mat) * 15
+                # ادفع نحو التبادل
+                score += (20 - total) * 5
 
         return score
 
-    def minimax(self, engine, depth, alpha, beta,
+    def order_moves(self, moves, is_cap, eng, player):
+        def key(m):
+            s = 0
+            if is_cap:
+                s += len(m) * 300
+            dest = m[-1]
+            s += POS_VALUE[dest[0]][dest[1]] * 5
+
+            # أولوية الترقية
+            if player in (P.L, P.LK) and dest[0] == 0:
+                s += 200
+            if player in (P.D, P.DK) and dest[0] == 7:
+                s += 200
+
+            # المركز
+            if 2 <= dest[0] <= 5 and 2 <= dest[1] <= 5:
+                s += 20
+            return s
+
+        return sorted(moves, key=key, reverse=True)
+
+    def minimax(self, eng, depth, alpha, beta,
                 maximizing, current, original):
         self.nodes += 1
 
-        result = engine.game_over()
+        result = eng.game_over()
         if result is not None:
             if result == original:
-                return 9999.0, None
+                return 99999 + depth, None
             elif result == -1:
-                return 0.0, None
+                return 0, None
             else:
-                return -9999.0, None
+                return -99999 - depth, None
 
         if depth == 0:
-            return self.evaluate(engine, original), None
+            return self.evaluate(eng, original), None
 
-        moves, _ = engine.get_all_moves(current)
+        moves, is_cap = eng.get_moves(current)
         if not moves:
-            return self.evaluate(engine, original), None
+            return self.evaluate(eng, original), None
 
-        best_move = moves[0]
-        nxt = engine.opponent(current)
+        moves = self.order_moves(moves, is_cap, eng, current)
+        best = moves[0]
+        nxt = eng.opp(current)
 
         if maximizing:
-            max_e = float("-inf")
+            mx = float("-inf")
             for m in moves:
-                child = engine.copy()
-                child.execute_move(m)
+                child = eng.copy()
+                child.do_move(m)
                 v, _ = self.minimax(
                     child, depth - 1, alpha, beta,
                     False, nxt, original
                 )
-                if v > max_e:
-                    max_e = v
-                    best_move = m
+                if v > mx:
+                    mx = v
+                    best = m
                 alpha = max(alpha, v)
                 if beta <= alpha:
                     break
-            return max_e, best_move
+            return mx, best
         else:
-            min_e = float("inf")
+            mn = float("inf")
             for m in moves:
-                child = engine.copy()
-                child.execute_move(m)
+                child = eng.copy()
+                child.do_move(m)
                 v, _ = self.minimax(
                     child, depth - 1, alpha, beta,
                     True, nxt, original
                 )
-                if v < min_e:
-                    min_e = v
-                    best_move = m
+                if v < mn:
+                    mn = v
+                    best = m
                 beta = min(beta, v)
                 if beta <= alpha:
                     break
-            return min_e, best_move
+            return mn, best
 
-    def find_best(self, engine, player):
+    def analyze_all_moves(self, eng, player):
+        """تحليل وتصنيف كل الحركات المتاحة"""
         self.nodes = 0
         t0 = time.time()
-        score, move = self.minimax(
-            engine, self.depth,
-            float("-inf"), float("inf"),
-            True, player, player
-        )
+
+        moves, is_cap = eng.get_moves(player)
+        if not moves:
+            return []
+
+        results = []
+        for move in moves:
+            child = eng.copy()
+            child.do_move(move)
+
+            score, _ = self.minimax(
+                child, self.depth - 1,
+                float("-inf"), float("inf"),
+                False, eng.opp(player), player
+            )
+
+            # تصنيف الحركة
+            is_capture = (
+                len(move) > 2
+                or (len(move) == 2
+                    and abs(move[0][0] - move[1][0]) == 2)
+            )
+
+            captured_count = 0
+            if is_capture:
+                for i in range(len(move) - 1):
+                    if abs(move[i][0] - move[i+1][0]) == 2:
+                        captured_count += 1
+
+            dest = move[-1]
+            promotes = False
+            piece = eng.board[move[0][0]][move[0][1]]
+            if dest[0] == 0 and piece == P.L:
+                promotes = True
+            if dest[0] == 7 and piece == P.D:
+                promotes = True
+
+            results.append({
+                "move": move,
+                "score": round(score, 1),
+                "is_capture": is_capture,
+                "captured": captured_count,
+                "promotes": promotes,
+                "piece": int(piece),
+            })
+
+        results.sort(key=lambda x: x["score"], reverse=True)
+
+        elapsed = time.time() - t0
+
+        # إضافة ترتيب ونسبة فوز تقديرية
+        best_score = results[0]["score"] if results else 0
+        for i, r in enumerate(results):
+            r["rank"] = i + 1
+
+            s = r["score"]
+            if s > 5000:
+                r["win_pct"] = 99
+            elif s < -5000:
+                r["win_pct"] = 1
+            else:
+                r["win_pct"] = max(1, min(99,
+                    int(50 + s / 20)))
+
         return {
-            "move": move,
-            "score": round(score, 2),
-            "nodes": self.nodes,
-            "time": round(time.time() - t0, 3),
+            "moves": results,
+            "total_nodes": self.nodes,
+            "time": round(elapsed, 2),
+            "is_forced_capture": is_cap,
+            "position_eval": round(
+                self.evaluate(eng, player), 1
+            ),
         }
 
 
 # ══════════════════════════════════════════
-# 4. رسم الرقعة البصرية
+# تحليل الصور المتقدم
 # ══════════════════════════════════════════
 
-class Renderer:
-    CELL = 70
+class Vision:
 
     @staticmethod
-    def render(board, selected=None, valid_dests=None,
-               last_move=None):
-        C = Renderer.CELL
-        sz = C * 8
-        img = Image.new("RGB", (sz, sz))
-        draw = ImageDraw.Draw(img)
+    def fix_perspective(img_bgr):
+        """تصحيح المنظور التلقائي"""
+        gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+        blur = cv2.GaussianBlur(gray, (5, 5), 0)
+        edges = cv2.Canny(blur, 30, 100)
+        kernel = cv2.getStructuringElement(
+            cv2.MORPH_RECT, (3, 3)
+        )
+        edges = cv2.dilate(edges, kernel, iterations=2)
+
+        contours, _ = cv2.findContours(
+            edges, cv2.RETR_EXTERNAL,
+            cv2.CHAIN_APPROX_SIMPLE
+        )
+        if not contours:
+            return cv2.resize(img_bgr, (400, 400)), False
+
+        largest = max(contours, key=cv2.contourArea)
+        area = cv2.contourArea(largest)
+        img_area = img_bgr.shape[0] * img_bgr.shape[1]
+
+        if area < img_area * 0.15:
+            return cv2.resize(img_bgr, (400, 400)), False
+
+        peri = cv2.arcLength(largest, True)
+        approx = cv2.approxPolyDP(largest, 0.02 * peri, True)
+
+        if len(approx) == 4:
+            pts = approx.reshape(4, 2).astype(np.float32)
+            s = pts.sum(axis=1)
+            d = np.diff(pts, axis=1).ravel()
+
+            ordered = np.zeros((4, 2), dtype=np.float32)
+            ordered[0] = pts[np.argmin(s)]
+            ordered[2] = pts[np.argmax(s)]
+            ordered[1] = pts[np.argmin(d)]
+            ordered[3] = pts[np.argmax(d)]
+
+            dst = np.array(
+                [[0, 0], [399, 0], [399, 399], [0, 399]],
+                dtype=np.float32
+            )
+            M = cv2.getPerspectiveTransform(ordered, dst)
+            warped = cv2.warpPerspective(
+                img_bgr, M, (400, 400)
+            )
+            return warped, True
+
+        x, y, w, h = cv2.boundingRect(largest)
+        cropped = img_bgr[y:y + h, x:x + w]
+        return cv2.resize(cropped, (400, 400)), False
+
+    @staticmethod
+    def detect_by_hsv(img_400, lt=160, dt=100):
+        """كشف بتحليل HSV + Variance"""
+        hsv = cv2.cvtColor(img_400, cv2.COLOR_BGR2HSV)
+        gray = cv2.cvtColor(img_400, cv2.COLOR_BGR2GRAY)
+        cell = 50
+
+        board = np.zeros((8, 8), dtype=np.int8)
+        details = []
 
         for r in range(8):
             for c in range(8):
-                x1, y1 = c * C, r * C
-                x2, y2 = x1 + C, y1 + C
+                if (r + c) % 2 == 0:
+                    continue
+
+                m = cell // 4
+                y1, y2 = r * cell + m, (r + 1) * cell - m
+                x1, x2 = c * cell + m, (c + 1) * cell - m
+
+                roi_g = gray[y1:y2, x1:x2]
+                roi_h = hsv[y1:y2, x1:x2]
+
+                bright = float(np.mean(roi_g))
+                sat = float(np.mean(roi_h[:, :, 1]))
+                var = float(np.var(roi_g))
+
+                det = int(P.E)
+                if var > 120 or sat > 30:
+                    if bright > lt:
+                        det = int(P.L)
+                    elif bright < dt:
+                        det = int(P.D)
+
+                board[r][c] = det
+                details.append({
+                    "r": r, "c": c,
+                    "bright": round(bright),
+                    "sat": round(sat),
+                    "var": round(var),
+                    "det": det,
+                })
+        return board, details
+
+    @staticmethod
+    def detect_by_circles(img_400, lt=160, dt=100):
+        """كشف بـ HoughCircles"""
+        gray = cv2.cvtColor(img_400, cv2.COLOR_BGR2GRAY)
+        gray = cv2.medianBlur(gray, 5)
+        cell = 50
+
+        circles = cv2.HoughCircles(
+            gray, cv2.HOUGH_GRADIENT,
+            dp=1.2, minDist=35,
+            param1=60, param2=35,
+            minRadius=12, maxRadius=24
+        )
+
+        board = np.zeros((8, 8), dtype=np.int8)
+        vis = img_400.copy()
+
+        if circles is not None:
+            circles = np.uint16(np.around(circles))
+            for cx, cy, radius in circles[0]:
+                col = int(cx / cell)
+                row = int(cy / cell)
+                if not (0 <= row < 8 and 0 <= col < 8):
+                    continue
+                if (row + col) % 2 == 0:
+                    continue
+
+                sample = gray[
+                    max(0, int(cy) - 5):min(400, int(cy) + 5),
+                    max(0, int(cx) - 5):min(400, int(cx) + 5)
+                ]
+                if sample.size == 0:
+                    continue
+                avg = float(np.mean(sample))
+
+                if avg > lt:
+                    board[row][col] = int(P.L)
+                    color = (0, 255, 0)
+                elif avg < dt:
+                    board[row][col] = int(P.D)
+                    color = (0, 0, 255)
+                else:
+                    continue
+
+                cv2.circle(
+                    vis, (int(cx), int(cy)),
+                    int(radius), color, 2
+                )
+
+        vis_pil = Image.fromarray(
+            cv2.cvtColor(vis, cv2.COLOR_BGR2RGB)
+        )
+        return board, vis_pil
+
+    @staticmethod
+    def merge(hsv_board, circle_board):
+        """دمج ذكي"""
+        merged = np.zeros((8, 8), dtype=np.int8)
+        for r in range(8):
+            for c in range(8):
+                h, ci = hsv_board[r][c], circle_board[r][c]
+                if h != P.E and ci != P.E and h == ci:
+                    merged[r][c] = h
+                elif ci != P.E:
+                    merged[r][c] = ci
+                elif h != P.E:
+                    merged[r][c] = h
+        return merged
+
+
+# ══════════════════════════════════════════
+# رسم الرقعة والأسهم
+# ══════════════════════════════════════════
+
+class Render:
+
+    @staticmethod
+    def draw_board(board, arrows=None, highlight=None,
+                   label=None):
+        """رسم الرقعة مع أسهم الحركات"""
+        img = Image.new("RGB", (BOARD_PX, BOARD_PX))
+        dr = ImageDraw.Draw(img)
+
+        for r in range(8):
+            for c in range(8):
+                x1, y1 = c * CELL, r * CELL
+                x2, y2 = x1 + CELL, y1 + CELL
 
                 if (r + c) % 2 == 0:
-                    sq = (240, 217, 181)
+                    sq = (235, 215, 180)
                 else:
-                    sq = (181, 136, 99)
+                    sq = (175, 130, 95)
 
-                if selected and (r, c) == selected:
-                    sq = (100, 220, 100)
-                elif valid_dests and (r, c) in valid_dests:
-                    sq = (255, 220, 60)
-                elif last_move and (r, c) in last_move:
-                    if (r + c) % 2 != 0:
-                        sq = (150, 180, 220)
+                if highlight and (r, c) in highlight:
+                    sq = (100, 200, 100)
 
-                draw.rectangle([x1, y1, x2, y2], fill=sq)
+                dr.rectangle([x1, y1, x2, y2], fill=sq)
 
-                piece = board[r][c]
-                if piece != Piece.EMPTY:
-                    cx = x1 + C // 2
-                    cy = y1 + C // 2
-                    pr = 26
+                p = board[r][c]
+                if p == P.E:
+                    continue
 
-                    draw.ellipse(
-                        [cx - pr + 3, cy - pr + 3,
-                         cx + pr + 3, cy + pr + 3],
-                        fill=(80, 60, 40)
+                cx = x1 + CELL // 2
+                cy = y1 + CELL // 2
+                pr = CELL // 2 - 10
+
+                # ظل
+                dr.ellipse(
+                    [cx - pr + 3, cy - pr + 3,
+                     cx + pr + 3, cy + pr + 3],
+                    fill=(70, 50, 30)
+                )
+
+                fl = ((250, 248, 240)
+                      if Engine.is_light(p) else (45, 45, 45))
+                ed = ((195, 185, 170)
+                      if Engine.is_light(p) else (25, 25, 25))
+
+                dr.ellipse(
+                    [cx - pr, cy - pr, cx + pr, cy + pr],
+                    fill=fl, outline=ed, width=2
+                )
+                dr.ellipse(
+                    [cx - pr + 5, cy - pr + 5,
+                     cx + pr - 5, cy + pr - 5],
+                    outline=ed, width=1
+                )
+
+                if Engine.is_king(p):
+                    kr = 12
+                    dr.ellipse(
+                        [cx - kr, cy - kr,
+                         cx + kr, cy + kr],
+                        fill=(255, 215, 0),
+                        outline=(200, 170, 0), width=2
                     )
 
-                    if CheckersEngine.is_light(piece):
-                        fl = (255, 253, 245)
-                        ed = (200, 190, 175)
-                    else:
-                        fl = (50, 50, 50)
-                        ed = (30, 30, 30)
+        # إحداثيات
+        for i in range(8):
+            try:
+                dr.text(
+                    (3, i * CELL + 3), str(i),
+                    fill=(130, 110, 90)
+                )
+                dr.text(
+                    (i * CELL + CELL // 2 - 4,
+                     BOARD_PX - 14),
+                    chr(65 + i), fill=(130, 110, 90)
+                )
+            except Exception:
+                pass
 
-                    draw.ellipse(
-                        [cx - pr, cy - pr, cx + pr, cy + pr],
-                        fill=fl, outline=ed, width=2
-                    )
-                    draw.ellipse(
-                        [cx - pr + 6, cy - pr + 6,
-                         cx + pr - 6, cy + pr - 6],
-                        outline=ed, width=1
-                    )
+        # أسهم
+        if arrows:
+            for arrow in arrows:
+                move = arrow["move"]
+                color = arrow.get("color", (255, 50, 50))
+                width = arrow.get("width", 5)
+                Render._draw_arrow(dr, move, color, width)
 
-                    if CheckersEngine.is_king(piece):
-                        kr = 10
-                        draw.ellipse(
-                            [cx - kr, cy - kr,
-                             cx + kr, cy + kr],
-                            fill=(255, 215, 0),
-                            outline=(200, 170, 0),
-                            width=2
-                        )
+        # عنوان
+        if label:
+            try:
+                dr.rectangle([0, 0, BOARD_PX, 22],
+                             fill=(0, 0, 0, 180))
+                dr.text((5, 3), label, fill=(255, 255, 255))
+            except Exception:
+                pass
 
         return img
 
     @staticmethod
-    def draw_arrow(img, move):
+    def _draw_arrow(draw, move, color, width):
         if not move or len(move) < 2:
-            return img
-        draw = ImageDraw.Draw(img)
-        C = Renderer.CELL
+            return
 
         for i in range(len(move) - 1):
             sr, sc = move[i]
             er, ec = move[i + 1]
-            sx = sc * C + C // 2
-            sy = sr * C + C // 2
-            ex = ec * C + C // 2
-            ey = er * C + C // 2
+            sx = sc * CELL + CELL // 2
+            sy = sr * CELL + CELL // 2
+            ex = ec * CELL + CELL // 2
+            ey = er * CELL + CELL // 2
 
             draw.line(
                 [(sx, sy), (ex, ey)],
-                fill=(255, 50, 50), width=4
+                fill=color, width=width
             )
             draw.ellipse(
                 [ex - 8, ey - 8, ex + 8, ey + 8],
-                fill=(255, 50, 50)
+                fill=color
             )
 
         sr, sc = move[0]
-        sx = sc * C + C // 2
-        sy = sr * C + C // 2
+        sx = sc * CELL + CELL // 2
+        sy = sr * CELL + CELL // 2
         draw.ellipse(
-            [sx - 10, sy - 10, sx + 10, sy + 10],
+            [sx - 12, sy - 12, sx + 12, sy + 12],
             outline=(0, 220, 0), width=4
         )
 
-        return img
-
 
 # ══════════════════════════════════════════
-# 5. نظام التحكم (اضغط → حرّك)
-# ══════════════════════════════════════════
-
-def init_state():
-    """تهيئة جميع متغيرات الحالة"""
-    defaults = {
-        "engine": None,
-        "selected": None,
-        "valid_moves_map": {},
-        "movable_pieces": set(),
-        "current_player": Piece.LIGHT,
-        "human_color": Piece.LIGHT,
-        "ai_color": Piece.DARK,
-        "history": [],
-        "last_move": None,
-        "message": "",
-        "ai_depth": 4,
-        "started": False,
-        "move_count": 0,
-        "undo_stack": [],
-        "mode": "pvai",
-    }
-    for key, val in defaults.items():
-        if key not in st.session_state:
-            st.session_state[key] = val
-
-    if st.session_state.engine is None:
-        st.session_state.engine = CheckersEngine()
-
-
-def compute_movable():
-    """حساب القطع القابلة للتحريك"""
-    engine = st.session_state.engine
-    player = st.session_state.current_player
-    all_moves, _ = engine.get_all_moves(player)
-    st.session_state.movable_pieces = set(
-        m[0] for m in all_moves
-    )
-
-
-def select_piece(r, c):
-    """
-    اختيار قطعة: تتحول لـ 🟢
-    وتظهر الوجهات المتاحة 🟡
-    """
-    engine = st.session_state.engine
-    player = st.session_state.current_player
-
-    all_moves, is_capture = engine.get_all_moves(player)
-    piece_moves = [m for m in all_moves if m[0] == (r, c)]
-
-    if not piece_moves:
-        st.session_state.selected = None
-        st.session_state.valid_moves_map = {}
-        st.session_state.message = "⚠️ هذه القطعة لا تملك حركات"
-        return
-
-    st.session_state.selected = (r, c)
-
-    # ربط كل وجهة نهائية بالحركة الكاملة
-    dest_map = {}
-    for move in piece_moves:
-        dest = move[-1]
-        if (dest not in dest_map
-                or len(move) > len(dest_map[dest])):
-            dest_map[dest] = move
-
-    st.session_state.valid_moves_map = dest_map
-
-    if is_capture:
-        st.session_state.message = "⚡ أكل إجباري! اختر وجهة"
-    else:
-        st.session_state.message = "🟡 اضغط على مربع أصفر للتحرك"
-
-
-def execute_human_move(dest_r, dest_c):
-    """
-    تنفيذ حركة اللاعب:
-    - القطعة تختفي من مكانها ✅
-    - تظهر في المكان الجديد ✅
-    - القطع المأكولة تختفي ✅
-    """
-    move = st.session_state.valid_moves_map.get(
-        (dest_r, dest_c)
-    )
-    if not move:
-        return
-
-    engine = st.session_state.engine
-
-    # حفظ نسخة للتراجع
-    st.session_state.undo_stack.append(
-        engine.board.copy().tolist()
-    )
-
-    is_cap = (
-        len(move) > 2
-        or (len(move) == 2
-            and abs(move[0][0] - move[1][0]) == 2)
-    )
-
-    # ── تنفيذ الحركة ──
-    engine.execute_move(move)
-
-    # ── تسجيل الحركة ──
-    path = " → ".join(f"({p[0]},{p[1]})" for p in move)
-    icon = (
-        "⚪" if CheckersEngine.is_light(
-            st.session_state.current_player
-        ) else "⚫"
-    )
-    cap_txt = " 💥أكل!" if is_cap else ""
-    st.session_state.history.append(
-        f"{icon} {path}{cap_txt}"
-    )
-    st.session_state.move_count += 1
-
-    st.session_state.last_move = move
-    st.session_state.selected = None
-    st.session_state.valid_moves_map = {}
-
-    # تبديل الدور
-    st.session_state.current_player = engine.opponent(
-        st.session_state.current_player
-    )
-    st.session_state.message = ""
-
-
-def handle_click(r, c):
-    """معالجة ضغطة على خلية"""
-    engine = st.session_state.engine
-    player = st.session_state.current_player
-
-    if (st.session_state.mode == "pvai"
-            and player != st.session_state.human_color):
-        return
-
-    selected = st.session_state.selected
-    valid_map = st.session_state.valid_moves_map
-
-    if selected is None:
-        # لا شيء مختار → حاول اختيار قطعة
-        if engine.belongs_to(engine.board[r][c], player):
-            select_piece(r, c)
-    else:
-        if (r, c) in valid_map:
-            # ضغط على وجهة صالحة → نفّذ الحركة
-            execute_human_move(r, c)
-        elif (r, c) == selected:
-            # ضغط على نفس القطعة → إلغاء الاختيار
-            st.session_state.selected = None
-            st.session_state.valid_moves_map = {}
-            st.session_state.message = ""
-        elif engine.belongs_to(engine.board[r][c], player):
-            # ضغط على قطعة أخرى → تغيير الاختيار
-            select_piece(r, c)
-        else:
-            # ضغط على مكان غير صالح → إلغاء
-            st.session_state.selected = None
-            st.session_state.valid_moves_map = {}
-            st.session_state.message = ""
-
-
-def play_ai():
-    """دور الذكاء الاصطناعي"""
-    engine = st.session_state.engine
-
-    if engine.game_over() is not None:
-        return
-
-    ai = CheckersAI(depth=st.session_state.ai_depth)
-    result = ai.find_best(engine, st.session_state.ai_color)
-
-    move = result["move"]
-    if not move:
-        return
-
-    st.session_state.undo_stack.append(
-        engine.board.copy().tolist()
-    )
-
-    is_cap = (
-        len(move) > 2
-        or (len(move) == 2
-            and abs(move[0][0] - move[1][0]) == 2)
-    )
-
-    engine.execute_move(move)
-
-    path = " → ".join(f"({p[0]},{p[1]})" for p in move)
-    icon = (
-        "⚪" if CheckersEngine.is_light(
-            st.session_state.ai_color
-        ) else "⚫"
-    )
-    cap_txt = " 💥أكل!" if is_cap else ""
-
-    st.session_state.history.append(
-        f"🤖{icon} {path}{cap_txt}"
-    )
-    st.session_state.move_count += 1
-
-    st.session_state.last_move = move
-    st.session_state.current_player = engine.opponent(
-        st.session_state.ai_color
-    )
-    st.session_state.message = (
-        f"🤖 AI لعب: {path} "
-        f"({result['time']}s, {result['nodes']} عقدة)"
-    )
-
-
-def undo_move():
-    """التراجع عن آخر حركة"""
-    if st.session_state.undo_stack:
-        old = st.session_state.undo_stack.pop()
-        st.session_state.engine = CheckersEngine(old)
-        st.session_state.selected = None
-        st.session_state.valid_moves_map = {}
-        st.session_state.last_move = None
-
-        if st.session_state.history:
-            st.session_state.history.pop()
-
-        st.session_state.current_player = (
-            CheckersEngine.opponent(
-                st.session_state.current_player
-            )
-        )
-        st.session_state.message = "↩️ تم التراجع"
-
-
-def new_game():
-    """بدء لعبة جديدة"""
-    st.session_state.engine = CheckersEngine()
-    st.session_state.selected = None
-    st.session_state.valid_moves_map = {}
-    st.session_state.movable_pieces = set()
-    st.session_state.current_player = Piece.LIGHT
-    st.session_state.history = []
-    st.session_state.last_move = None
-    st.session_state.message = "🎮 لعبة جديدة! الفاتح يبدأ"
-    st.session_state.started = True
-    st.session_state.move_count = 0
-    st.session_state.undo_stack = []
-
-
-# ══════════════════════════════════════════
-# 6. واجهة Streamlit التفاعلية
+# واجهة المساعد الذكي
 # ══════════════════════════════════════════
 
 def main():
     st.set_page_config(
-        page_title="♟️ داما تفاعلية",
-        page_icon="♟️",
-        layout="wide",
+        "♟️ مساعد الداما الشرس", "♟️", layout="wide"
     )
 
-    # ── CSS مخصص ──
-    st.markdown("""
-    <style>
+    st.markdown("""<style>
     .block-container {max-width:1100px}
-
-    div[data-testid="stHorizontalBlock"]
-        > div[data-testid="column"] {
-        padding: 0 1px !important;
+    .best-box {
+        background:linear-gradient(135deg,#28a745,#20c997);
+        color:#fff; padding:18px; border-radius:12px;
+        text-align:center; margin:10px 0;
     }
-
-    .stButton > button {
-        height: 62px !important;
-        min-height: 62px !important;
-        font-size: 28px !important;
-        padding: 0 !important;
-        border-radius: 4px !important;
-        line-height: 1 !important;
-    }
-
-    .turn-box {
-        text-align:center; font-size:1.2em;
-        padding:12px; border-radius:10px;
-        margin:8px 0; font-weight:bold;
-    }
-    .your-turn {
-        background:#d4edda; border:2px solid #28a745;
-        color:#155724;
-    }
-    .ai-turn {
-        background:#fff3cd; border:2px solid #ffc107;
-        color:#856404;
-    }
-    .capture-msg {
+    .best-box h2 {margin:0; font-size:1.6em}
+    .best-box p {margin:5px 0; font-size:1.1em}
+    .warn-box {
         background:#f8d7da; border:2px solid #dc3545;
-        color:#721c24; text-align:center;
-        padding:8px; border-radius:8px; margin:5px 0;
+        color:#721c24; padding:12px; border-radius:10px;
+        text-align:center; margin:8px 0; font-weight:bold;
     }
-    .result-box {
-        background:linear-gradient(135deg,#667eea,#764ba2);
-        color:#fff; padding:20px; border-radius:12px;
-        text-align:center; font-size:1.5em; margin:10px 0;
+    .eval-bar {
+        background:#e9ecef; border-radius:8px;
+        overflow:hidden; height:30px; margin:8px 0;
     }
-    </style>
-    """, unsafe_allow_html=True)
+    .eval-fill {
+        height:100%; text-align:center; color:#fff;
+        font-weight:bold; line-height:30px;
+        border-radius:8px;
+    }
+    </style>""", unsafe_allow_html=True)
 
-    init_state()
+    st.title("♟️ مساعد الداما الشرس")
+    st.caption(
+        "حمّل صورة أو أدخل الرقعة يدوياً → "
+        "المساعد يحلل ويريك كيف تفوز"
+    )
 
-    st.title("♟️ لعبة الداما التفاعلية")
-    st.caption("اضغط على قطعتك 🟢 ثم اضغط على الوجهة 🟡")
+    # حالة
+    if "board" not in st.session_state:
+        st.session_state.board = Engine._init().tolist()
 
     # ═══ الشريط الجانبي ═══
     with st.sidebar:
         st.header("⚙️ الإعدادات")
 
-        mode = st.radio(
-            "🎮 نوع اللعبة:",
-            ["🤖 ضد الذكاء الاصطناعي", "👥 لاعبَين"],
+        my_color = st.radio(
+            "♟️ لون قطعك:",
+            ["⚪ الفاتح", "⚫ الداكن"]
         )
-        st.session_state.mode = (
-            "pvai" if "ذكاء" in mode else "pvp"
+        player = P.L if "الفاتح" in my_color else P.D
+
+        depth = st.select_slider(
+            "🧠 عمق التحليل:",
+            ["سريع (3)", "متوسط (5)", "عميق (7)",
+             "شرس (9)", "وحشي (11)"],
+            value="متوسط (5)"
         )
-
-        if st.session_state.mode == "pvai":
-            color = st.radio(
-                "♟️ لونك:",
-                ["⚪ الفاتح (أعلى)", "⚫ الداكن (أسفل)"],
-            )
-            st.session_state.human_color = (
-                Piece.LIGHT if "الفاتح" in color
-                else Piece.DARK
-            )
-            st.session_state.ai_color = (
-                CheckersEngine.opponent(
-                    st.session_state.human_color
-                )
-            )
-
-            diff = st.select_slider(
-                "🧠 الصعوبة:",
-                ["سهل", "متوسط", "صعب", "خبير"],
-                value="متوسط",
-            )
-            depth_map = {
-                "سهل": 2, "متوسط": 4,
-                "صعب": 6, "خبير": 8,
-            }
-            st.session_state.ai_depth = depth_map[diff]
+        depth_val = int(depth.split("(")[1].split(")")[0])
 
         st.divider()
 
-        c1, c2 = st.columns(2)
-        with c1:
-            if st.button(
-                "🆕 جديدة",
-                use_container_width=True,
-                type="primary",
-            ):
-                new_game()
-                st.rerun()
-        with c2:
-            if st.button(
-                "↩️ تراجع",
-                use_container_width=True,
-            ):
-                undo_move()
-                st.rerun()
+        if st.button(
+            "🔄 رقعة ابتدائية",
+            use_container_width=True
+        ):
+            st.session_state.board = Engine._init().tolist()
+            st.rerun()
+
+        if st.button(
+            "🗑️ مسح الرقعة",
+            use_container_width=True
+        ):
+            st.session_state.board = np.zeros(
+                (8, 8), dtype=int
+            ).tolist()
+            st.rerun()
 
         st.divider()
-
-        # إحصائيات
-        engine = st.session_state.engine
-        li = engine.count_pieces(Piece.LIGHT)
-        di = engine.count_pieces(Piece.DARK)
+        board_arr = np.array(st.session_state.board)
+        eng_info = Engine(board_arr)
+        ln, lk = eng_info.count(P.L)
+        dn, dk = eng_info.count(P.D)
 
         st.markdown("### 📊 القطع")
-        mc1, mc2 = st.columns(2)
-        with mc1:
-            lbl = "⚪"
-            if st.session_state.mode == "pvai":
-                lbl += (
-                    " أنت"
-                    if st.session_state.human_color
-                       == Piece.LIGHT
-                    else " AI"
-                )
-            kd = (
-                f"👑×{li['kings']}"
-                if li["kings"] else None
-            )
-            st.metric(lbl, li["total"], delta=kd)
-        with mc2:
-            lbl = "⚫"
-            if st.session_state.mode == "pvai":
-                lbl += (
-                    " أنت"
-                    if st.session_state.human_color
-                       == Piece.DARK
-                    else " AI"
-                )
-            kd = (
-                f"👑×{di['kings']}"
-                if di["kings"] else None
-            )
-            st.metric(lbl, di["total"], delta=kd)
+        c1, c2 = st.columns(2)
+        with c1:
+            st.metric("⚪ فاتح", ln + lk,
+                       delta=f"👑{lk}" if lk else None)
+        with c2:
+            st.metric("⚫ داكن", dn + dk,
+                       delta=f"👑{dk}" if dk else None)
 
-        st.metric("🔢 الحركات", st.session_state.move_count)
+    # ═══ المحتوى ═══
+    input_tab, analyze_tab = st.tabs(
+        ["📥 إدخال الرقعة", "🧠 التحليل"]
+    )
 
-        # السجل
-        if st.session_state.history:
-            st.divider()
-            with st.expander(
-                f"📜 السجل ({len(st.session_state.history)})"
-            ):
-                for i, h in enumerate(
-                    st.session_state.history, 1
-                ):
-                    st.text(f"{i}. {h}")
+    # ─── تبويب الإدخال ───
+    with input_tab:
+        method = st.radio(
+            "طريقة الإدخال:",
+            ["✏️ يدوي", "📷 صورة"],
+            horizontal=True
+        )
 
-        st.divider()
-        st.markdown("""
-        **🎮 طريقة اللعب:**
-        1. اضغط على قطعتك → 🟢
-        2. اضغط على 🟡 للتحرك
-        3. القطعة تنتقل تلقائياً
-        4. المأكولة تختفي فوراً
-        """)
-
-    # ═══ المحتوى الرئيسي ═══
-
-    # ── فحص نهاية اللعبة ──
-    game_result = engine.game_over()
-    if game_result is not None:
-        if game_result == -1:
+        if method == "✏️ يدوي":
             st.markdown(
-                '<div class="result-box">🤝 تعادل!</div>',
-                unsafe_allow_html=True,
-            )
-        elif (st.session_state.mode == "pvp"
-              or game_result == st.session_state.human_color):
-            st.balloons()
-            winner = (
-                "⚪ الفاتح" if game_result == Piece.LIGHT
-                else "⚫ الداكن"
-            )
-            st.markdown(
-                f'<div class="result-box">'
-                f"🏆 فاز {winner}!</div>",
-                unsafe_allow_html=True,
-            )
-        else:
-            st.markdown(
-                '<div class="result-box">'
-                "😞 خسرت! حاول مرة أخرى</div>",
-                unsafe_allow_html=True,
+                "**اختر نوع القطعة ثم اضغط على المربع:**"
             )
 
-        if st.button("🔄 العب مرة أخرى", type="primary"):
-            new_game()
-            st.rerun()
-        return
-
-    # ── دور الذكاء الاصطناعي ──
-    is_ai_turn = (
-        st.session_state.mode == "pvai"
-        and st.session_state.current_player
-            == st.session_state.ai_color
-        and st.session_state.started
-    )
-
-    if is_ai_turn:
-        with st.spinner("🤖 الذكاء الاصطناعي يفكر..."):
-            play_ai()
-        st.rerun()
-
-    # ── حساب القطع القابلة للتحريك ──
-    compute_movable()
-
-    # ── مؤشر الدور ──
-    current_emoji = (
-        "⚪" if st.session_state.current_player
-              == Piece.LIGHT
-        else "⚫"
-    )
-
-    is_human = (
-        st.session_state.mode == "pvp"
-        or st.session_state.current_player
-           == st.session_state.human_color
-    )
-
-    if is_human:
-        if st.session_state.selected:
-            txt = (
-                f"{current_emoji} اختر المربع الأصفر"
-                f" 🟡 للتحرك — أو اضغط قطعة أخرى"
+            piece_opts = {
+                "⬜ فارغ": int(P.E),
+                "⚪ فاتح": int(P.L),
+                "⚫ داكن": int(P.D),
+                "👑 ملك فاتح": int(P.LK),
+                "♛ ملك داكن": int(P.DK),
+            }
+            selected_piece = st.radio(
+                "القطعة:", list(piece_opts.keys()),
+                horizontal=True,
+                label_visibility="collapsed"
             )
-        else:
-            txt = (
-                f"{current_emoji} دورك!"
-                f" اضغط على إحدى قطعك لاختيارها"
-            )
-        st.markdown(
-            f'<div class="turn-box your-turn">{txt}</div>',
-            unsafe_allow_html=True,
-        )
+            sel_val = piece_opts[selected_piece]
 
-    if st.session_state.message:
-        st.info(st.session_state.message)
+            symbols = {
+                int(P.E): "·",
+                int(P.L): "⚪",
+                int(P.D): "⚫",
+                int(P.LK): "👑",
+                int(P.DK): "♛",
+            }
 
-    # ── فحص الأكل الإجباري ──
-    _, is_forced_capture = engine.get_all_moves(
-        st.session_state.current_player
-    )
-    if is_forced_capture and st.session_state.selected is None:
-        st.markdown(
-            '<div class="capture-msg">'
-            "⚡ أكل إجباري! يجب عليك الأكل</div>",
-            unsafe_allow_html=True,
-        )
+            board_arr = np.array(st.session_state.board)
 
-    # ═══════════════════════════════
-    #  🎮 الرقعة التفاعلية
-    # ═══════════════════════════════
+            for r in range(8):
+                cols = st.columns(8)
+                for c in range(8):
+                    with cols[c]:
+                        playable = (r + c) % 2 != 0
+                        p = int(board_arr[r][c])
+                        sym = symbols.get(p, "·")
+                        if not playable:
+                            sym = ""
 
-    col_grid, col_visual = st.columns([1.4, 1])
-
-    with col_grid:
-        board = engine.board
-        selected = st.session_state.selected
-        valid_dests = set(
-            st.session_state.valid_moves_map.keys()
-        )
-        player = st.session_state.current_player
-        movable = st.session_state.movable_pieces
-
-        for r in range(8):
-            cols = st.columns(8)
-            for c in range(8):
-                with cols[c]:
-                    piece = int(board[r][c])
-                    playable = (r + c) % 2 != 0
-                    is_sel = selected == (r, c)
-                    is_dest = (r, c) in valid_dests
-
-                    # ── تحديد الرمز ──
-                    if is_sel:
-                        label = "🟢"
-                    elif is_dest:
-                        label = "🟡"
-                    elif piece == Piece.LIGHT:
-                        label = "⚪"
-                    elif piece == Piece.DARK:
-                        label = "⚫"
-                    elif piece == Piece.LIGHT_KING:
-                        label = "👑"
-                    elif piece == Piece.DARK_KING:
-                        label = "♛"
-                    elif playable:
-                        label = "▪"
-                    else:
-                        label = "▫"
-
-                    # ── هل يمكن الضغط؟ ──
-                    can_click = False
-
-                    if is_human and playable:
-                        if selected is None:
-                            can_click = (
-                                (r, c) in movable
-                            )
-                        else:
-                            can_click = (
-                                is_dest
-                                or is_sel
-                                or (r, c) in movable
-                            )
-
-                    # ── الزر ──
-                    st.button(
-                        label,
-                        key=f"b{r}{c}",
-                        use_container_width=True,
-                        disabled=not can_click,
-                        on_click=handle_click,
-                        args=(r, c),
-                    )
-
-    # ── العرض البصري ──
-    with col_visual:
-        st.markdown("##### 🎨 العرض البصري")
-
-        vd = (
-            set(st.session_state.valid_moves_map.keys())
-            if st.session_state.valid_moves_map
-            else None
-        )
-        visual = Renderer.render(
-            board,
-            selected=st.session_state.selected,
-            valid_dests=vd,
-            last_move=st.session_state.last_move,
-        )
-
-        if st.session_state.last_move:
-            visual = Renderer.draw_arrow(
-                visual, st.session_state.last_move
-            )
-
-        st.image(visual, use_container_width=True)
-
-        # دليل الرموز
-        st.markdown("""
-        | الرمز | المعنى |
-        |:-----:|:------:|
-        | 🟢 | قطعتك المختارة |
-        | 🟡 | حركة متاحة (اضغط!) |
-        | ⚪ | قطعة فاتحة |
-        | ⚫ | قطعة داكنة |
-        | 👑 | ملك فاتح |
-        | ♛ | ملك داكن |
-        """)
-
-        # زر اقتراح
-        if (is_human
-            and st.session_state.mode == "pvai"
-            and st.session_state.started):
-            if st.button(
-                "💡 ساعدني!",
-                use_container_width=True,
-            ):
-                with st.spinner("🧠 جاري التحليل..."):
-                    ai = CheckersAI(
-                        depth=st.session_state.ai_depth
-                    )
-                    res = ai.find_best(
-                        engine,
-                        st.session_state.human_color,
-                    )
-                    if res["move"]:
-                        hint = Renderer.render(board)
-                        hint = Renderer.draw_arrow(
-                            hint, res["move"]
-                        )
-                        st.image(
-                            hint,
-                            caption=(
-                                f"💡 اقتراح "
-                                f"(تقييم: {res['score']})"
-                            ),
+                        if st.button(
+                            sym, key=f"m{r}{c}",
                             use_container_width=True,
+                            disabled=not playable
+                        ):
+                            st.session_state.board[r][c] = \
+                                sel_val
+                            st.rerun()
+
+            # عرض بصري
+            vis = Render.draw_board(board_arr)
+            st.image(vis, caption="الرقعة الحالية",
+                     use_container_width=True)
+
+        elif method == "📷 صورة" and HAS_CV2:
+            st.markdown("""
+            **📸 ارفع صورة رقعة الداما:**
+            - يُفضّل صورة من الأعلى مباشرة
+            - يدعم صور مائلة (تصحيح منظور تلقائي)
+            - يكتشف القطع بـ HSV + HoughCircles
+            """)
+
+            uploaded = st.file_uploader(
+                "ارفع الصورة",
+                type=["jpg", "png", "jpeg"]
+            )
+
+            if uploaded:
+                pil = Image.open(uploaded).convert("RGB")
+                img_cv = cv2.cvtColor(
+                    np.array(pil), cv2.COLOR_RGB2BGR
+                )
+
+                c1, c2 = st.columns(2)
+                with c1:
+                    st.image(pil, caption="📸 الأصلية",
+                             use_container_width=True)
+
+                # تصحيح المنظور
+                with st.spinner("🔲 تصحيح المنظور..."):
+                    fixed, was_fixed = \
+                        Vision.fix_perspective(img_cv)
+
+                fixed_pil = Image.fromarray(
+                    cv2.cvtColor(fixed, cv2.COLOR_BGR2RGB)
+                )
+                with c2:
+                    cap = ("✅ تم التصحيح" if was_fixed
+                           else "📐 اقتصاص")
+                    st.image(fixed_pil, caption=cap,
+                             use_container_width=True)
+
+                st.markdown("**⚙️ ضبط العتبات:**")
+                tc1, tc2 = st.columns(2)
+                with tc1:
+                    lt = st.slider(
+                        "عتبة الفاتح (سطوع)",
+                        100, 230, 160
+                    )
+                with tc2:
+                    dt = st.slider(
+                        "عتبة الداكن (سطوع)",
+                        30, 150, 100
+                    )
+
+                if st.button(
+                    "🔍 تحليل الصورة", type="primary"
+                ):
+                    with st.spinner("🧠 تحليل متقدم..."):
+                        # HSV
+                        hsv_b, hsv_info = \
+                            Vision.detect_by_hsv(
+                                fixed, lt, dt
+                            )
+                        # دوائر
+                        circle_b, circle_vis = \
+                            Vision.detect_by_circles(
+                                fixed, lt, dt
+                            )
+                        # دمج
+                        merged = Vision.merge(
+                            hsv_b, circle_b
                         )
 
-    # ── Footer ──
+                    st.success("✅ اكتمل التحليل!")
+
+                    r1, r2, r3 = st.tabs(
+                        ["🎨 HSV", "⭕ دوائر", "🔀 مدمج"]
+                    )
+                    with r1:
+                        v1 = Render.draw_board(hsv_b)
+                        st.image(v1,
+                                 caption="نتيجة HSV",
+                                 use_container_width=True)
+                        with st.expander("🔬 تفاصيل"):
+                            for d in hsv_info:
+                                if d["det"] != 0:
+                                    nm = ("⚪" if d["det"] == 1
+                                          else "⚫")
+                                    st.text(
+                                        f"({d['r']},{d['c']})"
+                                        f" {nm}"
+                                        f" سطوع={d['bright']}"
+                                        f" تشبع={d['sat']}"
+                                        f" تباين={d['var']}"
+                                    )
+
+                    with r2:
+                        st.image(
+                            circle_vis,
+                            caption="الدوائر المكتشفة",
+                            use_container_width=True
+                        )
+                        v2 = Render.draw_board(circle_b)
+                        st.image(
+                            v2, caption="نتيجة الدوائر",
+                            use_container_width=True
+                        )
+
+                    with r3:
+                        v3 = Render.draw_board(merged)
+                        st.image(
+                            v3, caption="النتيجة المدمجة",
+                            use_container_width=True
+                        )
+
+                        eng_m = Engine(merged)
+                        mln, mlk = eng_m.count(P.L)
+                        mdn, mdk = eng_m.count(P.D)
+                        st.info(
+                            f"⚪ {mln} قطع + {mlk} ملوك  •  "
+                            f"⚫ {mdn} قطع + {mdk} ملوك"
+                        )
+
+                        if st.button(
+                            "📥 استخدم هذه الرقعة للتحليل",
+                            type="primary"
+                        ):
+                            st.session_state.board = \
+                                merged.tolist()
+                            st.success("✅ تم!")
+                            st.rerun()
+
+        elif method == "📷 صورة" and not HAS_CV2:
+            st.error(
+                "❌ مكتبة OpenCV غير مثبتة. "
+                "أضف opencv-python-headless "
+                "في requirements.txt"
+            )
+
+    # ─── تبويب التحليل ───
+    with analyze_tab:
+        board_arr = np.array(
+            st.session_state.board, dtype=np.int8
+        )
+        eng = Engine(board_arr)
+
+        # عرض الرقعة الحالية
+        st.image(
+            Render.draw_board(board_arr),
+            caption="الرقعة الحالية",
+            use_container_width=True
+        )
+
+        ln, lk = eng.count(P.L)
+        dn, dk = eng.count(P.D)
+
+        if (ln + lk) == 0 and (dn + dk) == 0:
+            st.warning("⚠️ الرقعة فارغة! أدخل القطع أولاً")
+            return
+
+        go = eng.game_over()
+        if go is not None:
+            if go == -1:
+                st.info("🤝 الوضعية منتهية بتعادل")
+            elif go == P.L:
+                st.success("🏆 الفاتح فائز!")
+            else:
+                st.success("🏆 الداكن فائز!")
+            return
+
+        emoji = "⚪" if player == P.L else "⚫"
+        st.markdown(f"### {emoji} تحليل حركات: **{'الفاتح' if player == P.L else 'الداكن'}**")
+
+        if st.button(
+            "🧠 حلّل الآن!", type="primary",
+            use_container_width=True
+        ):
+            with st.spinner(
+                f"🧠 جاري التحليل بعمق {depth_val}..."
+            ):
+                ai = BrutalAI(depth=depth_val)
+                analysis = ai.analyze_all_moves(eng, player)
+
+            if not analysis or not analysis["moves"]:
+                st.error("❌ لا توجد حركات متاحة!")
+                return
+
+            moves = analysis["moves"]
+            best = moves[0]
+
+            # ── تقييم الوضعية ──
+            pos_eval = analysis["position_eval"]
+            if pos_eval > 200:
+                eval_msg = "🟢 أنت متفوق بوضوح!"
+                eval_color = "#28a745"
+            elif pos_eval > 50:
+                eval_msg = "🟢 أنت أفضل قليلاً"
+                eval_color = "#20c997"
+            elif pos_eval > -50:
+                eval_msg = "🟡 الوضعية متكافئة"
+                eval_color = "#ffc107"
+            elif pos_eval > -200:
+                eval_msg = "🟠 الخصم أفضل قليلاً"
+                eval_color = "#fd7e14"
+            else:
+                eval_msg = "🔴 أنت في خطر!"
+                eval_color = "#dc3545"
+
+            pct = max(5, min(95,
+                int(50 + pos_eval / 20)))
+            st.markdown(f"""
+            <div class="eval-bar">
+                <div class="eval-fill"
+                     style="width:{pct}%;
+                     background:{eval_color}">
+                    {eval_msg} ({pos_eval})
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+
+            # ── الأكل الإجباري ──
+            if analysis["is_forced_capture"]:
+                st.markdown(
+                    '<div class="warn-box">'
+                    '⚡ أكل إجباري! يجب عليك الأكل'
+                    '</div>',
+                    unsafe_allow_html=True
+                )
+
+            # ── أفضل حركة ──
+            path = " → ".join(
+                f"({p[0]},{p[1]})" for p in best["move"]
+            )
+            extras = []
+            if best["is_capture"]:
+                extras.append(
+                    f"💥 تأكل {best['captured']} قطعة"
+                )
+            if best["promotes"]:
+                extras.append("👑 ترقية للملك!")
+            extra_text = " • ".join(extras) if extras else ""
+
+            st.markdown(f"""
+            <div class="best-box">
+                <h2>🏆 أفضل حركة</h2>
+                <p style="font-size:1.5em">{path}</p>
+                <p>{extra_text}</p>
+                <p>تقييم: {best['score']} •
+                   فرصة الفوز: {best['win_pct']}%</p>
+            </div>
+            """, unsafe_allow_html=True)
+
+            # ── صورة أفضل حركة ──
+            best_img = Render.draw_board(
+                board_arr,
+                arrows=[{
+                    "move": best["move"],
+                    "color": (50, 205, 50),
+                    "width": 6
+                }],
+                highlight=set(best["move"]),
+                label="BEST MOVE"
+            )
+            st.image(
+                best_img,
+                caption="🏆 أفضل حركة",
+                use_container_width=True
+            )
+
+            # ── نتيجة بعد الحركة ──
+            after = eng.copy()
+            after.do_move(best["move"])
+            after_img = Render.draw_board(after.board)
+            st.image(
+                after_img,
+                caption="📋 الرقعة بعد تنفيذ الحركة",
+                use_container_width=True
+            )
+
+            if st.button(
+                "✅ طبّق هذه الحركة على الرقعة",
+                use_container_width=True
+            ):
+                st.session_state.board = after.board.tolist()
+                st.rerun()
+
+            # ── تصنيف كل الحركات ──
+            st.markdown("---")
+            st.markdown(
+                f"### 📊 تصنيف كل الحركات "
+                f"({len(moves)} حركة)"
+            )
+
+            # ألوان التصنيف
+            rank_colors = {
+                1: ("🥇", (50, 205, 50)),
+                2: ("🥈", (65, 105, 225)),
+                3: ("🥉", (255, 165, 0)),
+            }
+
+            all_arrows = []
+            for i, mv in enumerate(moves):
+                icon, color = rank_colors.get(
+                    mv["rank"],
+                    (f"#{mv['rank']}", (180, 180, 180))
+                )
+                all_arrows.append({
+                    "move": mv["move"],
+                    "color": color,
+                    "width": 6 if i == 0 else 3
+                })
+
+            all_img = Render.draw_board(
+                board_arr, arrows=all_arrows[:5]
+            )
+            st.image(
+                all_img,
+                caption=(
+                    "🥇 أخضر = الأفضل  "
+                    "🥈 أزرق = ثاني  "
+                    "🥉 برتقالي = ثالث"
+                ),
+                use_container_width=True
+            )
+
+            for mv in moves:
+                icon = rank_colors.get(
+                    mv["rank"], (f"#{mv['rank']}", None)
+                )[0]
+                path = " → ".join(
+                    f"({p[0]},{p[1]})" for p in mv["move"]
+                )
+
+                tags = []
+                if mv["is_capture"]:
+                    tags.append(
+                        f"💥 أكل ×{mv['captured']}"
+                    )
+                if mv["promotes"]:
+                    tags.append("👑 ترقية")
+
+                score_bar = "█" * max(
+                    1, int(mv["win_pct"] / 5)
+                )
+
+                with st.expander(
+                    f"{icon} {path}  •  "
+                    f"تقييم: {mv['score']}  •  "
+                    f"فوز: {mv['win_pct']}%"
+                ):
+                    st.markdown(
+                        f"**المسار:** `{path}`"
+                    )
+                    if tags:
+                        st.markdown(
+                            f"**ملاحظات:** {' • '.join(tags)}"
+                        )
+                    st.markdown(
+                        f"**فرصة الفوز:** "
+                        f"`{score_bar}` {mv['win_pct']}%"
+                    )
+
+                    mv_img = Render.draw_board(
+                        board_arr,
+                        arrows=[{
+                            "move": mv["move"],
+                            "color": (255, 100, 50),
+                            "width": 5
+                        }],
+                        highlight=set(mv["move"])
+                    )
+                    st.image(
+                        mv_img,
+                        use_container_width=True
+                    )
+
+            # ── إحصائيات التحليل ──
+            st.markdown("---")
+            st.markdown("### ⚙️ إحصائيات التحليل")
+            s1, s2, s3 = st.columns(3)
+            with s1:
+                st.metric(
+                    "🔢 العقد المحسوبة",
+                    f"{analysis['total_nodes']:,}"
+                )
+            with s2:
+                st.metric(
+                    "⏱ الوقت",
+                    f"{analysis['time']}s"
+                )
+            with s3:
+                st.metric("📏 العمق", depth_val)
+
+    # Footer
     st.divider()
     st.markdown(
         '<p style="text-align:center;color:#999;'
-        'font-size:0.8em;">'
-        "♟️ داما تفاعلية v3.0 — "
-        "Minimax + Alpha-Beta — "
-        "بدون إنترنت أو APIs"
-        "</p>",
-        unsafe_allow_html=True,
+        'font-size:0.8em">'
+        '♟️ مساعد الداما الشرس v5.0 — '
+        'Minimax + Alpha-Beta + OpenCV — '
+        'يعمل بدون إنترنت</p>',
+        unsafe_allow_html=True
     )
 
 
