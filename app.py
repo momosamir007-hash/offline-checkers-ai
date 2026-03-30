@@ -529,13 +529,22 @@ def main():
                 fixed, was = Vision.fix_perspective(img_cv)
                 st.image(Image.fromarray(cv2.cvtColor(fixed, cv2.COLOR_BGR2RGB)), caption="✅ مصحح" if was else "مقتصة", use_container_width=True)
                 tc1, tc2 = st.columns(2)
-                lt, dt = tc1.slider("عتبة الفاتح", 100, 230, 160), tc2.slider("عتبة الداكن", 30, 150, 100)
+                lt = tc1.slider("عتبة الفاتح", 100, 230, 160)
+                dt = tc2.slider("عتبة الداكن", 30, 150, 100)
+                
+                # الزر الأول: معالجة الصورة وحفظ النتيجة في الذاكرة المؤقتة
                 if st.button("🔍 استخراج الرقعة", type="primary"):
                     with st.spinner("جاري الرؤية..."):
                         merged = Vision.merge(Vision.detect_hsv(fixed, lt, dt)[0], Vision.detect_circles(fixed, lt, dt)[0])
-                    st.image(Render.draw(merged), use_container_width=True)
+                        st.session_state.temp_merged_board = merged.tolist()
+                
+                # عرض الرقعة المؤقتة إذا كانت موجودة وإظهار زر الاعتماد المستقل
+                if "temp_merged_board" in st.session_state:
+                    st.image(Render.draw(st.session_state.temp_merged_board), use_container_width=True)
                     if st.button("📥 اعتماد الرقعة", type="primary"):
-                        st.session_state.board = merged.tolist(); st.rerun()
+                        st.session_state.board = st.session_state.temp_merged_board
+                        del st.session_state.temp_merged_board
+                        st.rerun()
         else:
             st.error("مكتبة OpenCV غير متوفرة في بيئة الاستضافة.")
 
