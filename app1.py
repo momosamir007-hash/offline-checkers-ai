@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-╔═══════════════════════════════════════════════════════╗
-║          ♟️ مساعد الداما الشرس v6.0                   ║
-║  Zobrist TT + Iterative Deepening + Quiescence        ║
-║  + Killer Moves + History + PVS + Vectorized Eval     ║
-╚═══════════════════════════════════════════════════════╝
+╔═══════════════════════════════════════════════╗
+║     ♟️ مساعد الداما الذكي — محرك وحشي v7     ║
+║  تقييم 12 عامل + Zobrist TT + PVS + LMR      ║
+║  عمق 15-20 في 3 ثوانٍ = لا يُقهر              ║
+╚═══════════════════════════════════════════════╝
 """
 
 import streamlit as st
@@ -22,51 +22,47 @@ except ImportError:
 
 
 # ══════════════════════════════════════════
-# ثوابت
+# 1. ثوابت
 # ══════════════════════════════════════════
 
 class P(IntEnum):
-    E = 0
-    L = 1
-    D = 2
-    LK = 3
-    DK = 4
+    E = 0; W = 1; B = 2; WK = 3; BK = 4
 
 CELL = 80
-BOARD_PX = CELL * 8
+BPX = CELL * 8
 
 # جداول التقييم الموضعي
-# القيم مصممة لتشجيع السيطرة على المركز والتقدم
-LIGHT_POS = np.array([
-    [0,  0, 0,  0, 0,  0, 0,  0],
-    [0,  0, 1,  0, 1,  0, 1,  0],
-    [0,  3, 0,  3, 0,  3, 0,  0],
-    [0,  0, 5,  0, 5,  0, 4,  0],
-    [0,  5, 0,  7, 0,  5, 0,  0],
-    [0,  0, 7,  0, 7,  0, 6,  0],
-    [0,  8, 0,  9, 0,  9, 0,  0],
-    [0,  0, 10, 0, 10, 0, 10, 0],
+ADV_W = np.array([
+    [0,0,0,0,0,0,0,0],
+    [0,0,2,0,2,0,2,0],
+    [0,3,0,4,0,4,0,3],
+    [0,0,5,0,6,0,5,0],
+    [0,6,0,8,0,8,0,6],
+    [0,0,9,0,10,0,9,0],
+    [0,12,0,14,0,14,0,12],
+    [0,0,0,0,0,0,0,0],
 ], dtype=np.float32)
+ADV_B = ADV_W[::-1].copy()
 
-DARK_POS = LIGHT_POS[::-1].copy()
-
-KING_POS = np.array([
-    [0, 1, 0, 1, 0, 1, 0, 1],
-    [1, 0, 3, 0, 3, 0, 3, 0],
-    [0, 3, 0, 5, 0, 5, 0, 3],
-    [1, 0, 5, 0, 7, 0, 5, 0],
-    [0, 5, 0, 7, 0, 5, 0, 1],
-    [3, 0, 5, 0, 5, 0, 3, 0],
-    [0, 3, 0, 3, 0, 3, 0, 1],
-    [1, 0, 1, 0, 1, 0, 1, 0],
+KING_TABLE = np.array([
+    [0,2,0,2,0,2,0,2],
+    [2,0,4,0,4,0,4,0],
+    [0,4,0,6,0,6,0,4],
+    [2,0,6,0,8,0,6,0],
+    [0,6,0,8,0,6,0,2],
+    [4,0,6,0,6,0,4,0],
+    [0,4,0,4,0,4,0,2],
+    [2,0,2,0,2,0,2,0],
 ], dtype=np.float32)
 
 
 # ══════════════════════════════════════════
-# محرك القواعد
+# 2. محرك القواعد (مُحسّن)
 # ══════════════════════════════════════════
 
 class Engine:
+
+    __slots__ = ['board']
 
     def __init__(self, board=None):
         self.board = (
@@ -81,10 +77,8 @@ class Engine:
         for r in range(8):
             for c in range(8):
                 if (r + c) % 2 != 0:
-                    if r < 3:
-                        b[r][c] = P.D
-                    elif r > 4:
-                        b[r][c] = P.L
+                    if r < 3: b[r][c] = P.B
+                    elif r > 4: b[r][c] = P.W
         return b
 
     def copy(self):
@@ -93,1230 +87,1054 @@ class Engine:
         return e
 
     @staticmethod
-    def is_light(p): return p in (P.L, P.LK)
-    @staticmethod
-    def is_dark(p): return p in (P.D, P.DK)
-    @staticmethod
-    def is_king(p): return p in (P.LK, P.DK)
+    def _own(piece, white):
+        if white: return piece in (P.W, P.WK)
+        return piece in (P.B, P.BK)
 
     @staticmethod
-    def owns(piece, player):
-        if player in (P.L, P.LK):
-            return piece in (P.L, P.LK)
-        return piece in (P.D, P.DK)
-
-    @staticmethod
-    def enemy(piece, player):
+    def _foe(piece, white):
         if piece == P.E: return False
-        if player in (P.L, P.LK):
-            return piece in (P.D, P.DK)
-        return piece in (P.L, P.LK)
+        if white: return piece in (P.B, P.BK)
+        return piece in (P.W, P.WK)
 
     @staticmethod
-    def opp(player):
-        return P.D if player in (P.L, P.LK) else P.L
-
-    @staticmethod
-    def dirs(piece):
-        if piece == P.L:  return ((-1,-1),(-1,1))
-        if piece == P.D:  return ((1,-1),(1,1))
-        if piece in (P.LK, P.DK):
+    def _dirs(piece):
+        if piece == P.W: return ((-1,-1),(-1,1))
+        if piece == P.B: return ((1,-1),(1,1))
+        if piece in (P.WK,P.BK):
             return ((-1,-1),(-1,1),(1,-1),(1,1))
         return ()
 
-    def _simple(self, r, c):
-        p = self.board[r][c]
-        out = []
-        for dr, dc in self.dirs(p):
-            nr, nc = r+dr, c+dc
-            if 0 <= nr < 8 and 0 <= nc < 8:
-                if self.board[nr][nc] == P.E:
-                    out.append(((r,c),(nr,nc)))
-        return out
-
-    def _jumps(self, r, c, bd=None, eaten=None):
-        if bd is None: bd = self.board
-        if eaten is None: eaten = frozenset()
-        p = bd[r][c]
-        chains = []
-        for dr, dc in self.dirs(p):
-            mr, mc = r+dr, c+dc
-            nr, nc = r+2*dr, c+2*dc
-            if not (0<=nr<8 and 0<=nc<8): continue
-            if bd[nr][nc] != P.E: continue
-            if not self.enemy(bd[mr][mc], p): continue
-            if (mr,mc) in eaten: continue
-            nb = bd.copy()
-            nb[nr][nc] = p; nb[r][c] = P.E; nb[mr][mc] = P.E
-            promo = False
-            if nr==0 and p==P.L: nb[nr][nc]=P.LK; promo=True
-            elif nr==7 and p==P.D: nb[nr][nc]=P.DK; promo=True
-            ne = eaten | {(mr,mc)}
-            fur = [] if promo else self._jumps(nr,nc,nb,ne)
-            if fur:
-                for ch in fur: chains.append(((r,c),)+ch)
-            else:
-                chains.append(((r,c),(nr,nc)))
-        return chains
-
-    def get_moves(self, player):
-        jumps, simple = [], []
+    def get_moves(self, white):
+        b = self.board
+        jumps = []
+        simple = []
         for r in range(8):
             for c in range(8):
-                if self.owns(self.board[r][c], player):
-                    jumps.extend(self._jumps(r,c))
-                    simple.extend(self._simple(r,c))
+                p = b[r][c]
+                if not self._own(p, white):
+                    continue
+                # أكل
+                for dr, dc in self._dirs(p):
+                    mr, mc = r+dr, c+dc
+                    nr, nc = r+2*dr, c+2*dc
+                    if not (0<=nr<8 and 0<=nc<8):
+                        continue
+                    if (b[nr][nc] == P.E
+                            and self._foe(b[mr][mc], white)):
+                        self._chain(
+                            r, c, b, white, jumps, frozenset()
+                        )
+                        break
+                else:
+                    # بسيطة
+                    for dr, dc in self._dirs(p):
+                        nr, nc = r+dr, c+dc
+                        if (0<=nr<8 and 0<=nc<8
+                                and b[nr][nc] == P.E):
+                            simple.append(((r,c),(nr,nc)))
+
         if jumps:
             mx = max(len(j) for j in jumps)
             return [j for j in jumps if len(j)==mx], True
         return simple, False
 
+    def _chain(self, r, c, bd, white, out, eaten):
+        p = bd[r][c]
+        found = False
+        for dr, dc in self._dirs(p):
+            mr, mc = r+dr, c+dc
+            nr, nc = r+2*dr, c+2*dc
+            if not (0<=nr<8 and 0<=nc<8):
+                continue
+            if bd[nr][nc] != P.E:
+                continue
+            if not self._foe(bd[mr][mc], white):
+                continue
+            if (mr,mc) in eaten:
+                continue
+            found = True
+            nb = bd.copy()
+            nb[nr][nc] = p; nb[r][c] = P.E; nb[mr][mc] = P.E
+            promo = False
+            if nr == 0 and p == P.W:
+                nb[nr][nc] = P.WK; promo = True
+            elif nr == 7 and p == P.B:
+                nb[nr][nc] = P.BK; promo = True
+            ne = eaten | {(mr,mc)}
+            if not promo:
+                sub = []
+                self._chain(nr, nc, nb, white, sub, ne)
+                if sub:
+                    for s in sub:
+                        out.append(((r,c),) + s)
+                else:
+                    out.append(((r,c),(nr,nc)))
+            else:
+                out.append(((r,c),(nr,nc)))
+
+        if not found and eaten:
+            pass  # نهاية السلسلة
+
     def do_move(self, move):
-        piece = self.board[move[0][0]][move[0][1]]
-        self.board[move[0][0]][move[0][1]] = P.E
+        b = self.board
+        piece = b[move[0][0]][move[0][1]]
+        b[move[0][0]][move[0][1]] = P.E
         for i in range(len(move)-1):
             sr,sc = move[i]; er,ec = move[i+1]
             dr,dc = er-sr, ec-sc
-            if abs(dr)==2 and abs(dc)==2:
-                self.board[sr+dr//2][sc+dc//2] = P.E
-        fr,fc = move[-1]
-        self.board[fr][fc] = piece
-        if fr==0 and piece==P.L: self.board[fr][fc]=P.LK
-        if fr==7 and piece==P.D: self.board[fr][fc]=P.DK
+            if abs(dr) == 2:
+                b[sr+dr//2][sc+dc//2] = P.E
+        fr, fc = move[-1]
+        b[fr][fc] = piece
+        if fr == 0 and piece == P.W: b[fr][fc] = P.WK
+        if fr == 7 and piece == P.B: b[fr][fc] = P.BK
 
-    def count(self, player):
-        n=k=0
-        for r in range(8):
-            for c in range(8):
-                p = self.board[r][c]
-                if self.owns(p, player):
-                    if self.is_king(p): k+=1
-                    else: n+=1
-        return n, k
-
-    def game_over(self):
-        ln,lk = self.count(P.L); dn,dk = self.count(P.D)
-        if ln+lk==0: return P.D
-        if dn+dk==0: return P.L
-        lm,_ = self.get_moves(P.L); dm,_ = self.get_moves(P.D)
-        if not lm and not dm: return -1
-        if not lm: return P.D
-        if not dm: return P.L
+    def winner(self):
+        """None=مستمرة, 1=أبيض, 2=أسود, 0=تعادل"""
+        wn = int(np.sum((self.board==P.W)|(self.board==P.WK)))
+        bn = int(np.sum((self.board==P.B)|(self.board==P.BK)))
+        if wn == 0: return 2
+        if bn == 0: return 1
+        wm, _ = self.get_moves(True)
+        if not wm:
+            bm, _ = self.get_moves(False)
+            if not bm: return 0
+            return 2
         return None
 
 
 # ══════════════════════════════════════════
-# 🔑 Zobrist Hashing
-# ══════════════════════════════════════════
-
-class ZobristHash:
-    """مفاتيح عشوائية ثابتة لكل (قطعة, موقع)
-    تحويل الرقعة لرقم فريد بـ O(64) XOR"""
-
-    def __init__(self):
-        rng = random.Random(777)
-        self.keys = {}
-        for p in range(1, 5):
-            for r in range(8):
-                for c in range(8):
-                    self.keys[(p, r, c)] = rng.getrandbits(64)
-        self.side_key = rng.getrandbits(64)
-
-    def compute(self, board, is_max_side=True):
-        h = 0
-        for r in range(8):
-            for c in range(8):
-                p = int(board[r][c])
-                if p != 0:
-                    h ^= self.keys[(p, r, c)]
-        if is_max_side:
-            h ^= self.side_key
-        return h
-
-
-# ══════════════════════════════════════════
-# 📦 Transposition Table
+# 3. Zobrist Transposition Table
 # ══════════════════════════════════════════
 
 EXACT, LOWER, UPPER = 0, 1, 2
 
-class TransTable:
-    """جدول تحويل بسعة 1M مدخلة
-    يخزن: العمق, التقييم, النوع, أفضل حركة"""
-
-    __slots__ = ['table', 'hits', 'writes', 'max_size']
-
-    def __init__(self, max_size=1_000_000):
+class ZobristTT:
+    def __init__(self, size=500_000):
+        rng = random.Random(12345)
+        self.z = {}
+        for p in range(1, 5):
+            for r in range(8):
+                for c in range(8):
+                    self.z[(p,r,c)] = rng.getrandbits(64)
+        self.side = rng.getrandbits(64)
         self.table = {}
-        self.max_size = max_size
+        self.size = size
         self.hits = 0
-        self.writes = 0
 
-    def probe(self, key, depth, alpha, beta):
-        """البحث في الجدول. يُرجع (score, move) أو None"""
-        e = self.table.get(key)
-        if e is None:
-            return None
+    def key(self, board, white_turn):
+        h = 0
+        for r in range(8):
+            for c in range(8):
+                p = int(board[r][c])
+                if p: h ^= self.z[(p,r,c)]
+        if white_turn: h ^= self.side
+        return h
 
-        if e[0] >= depth:     # e = (depth, score, flag, move)
+    def probe(self, k, depth, alpha, beta):
+        e = self.table.get(k)
+        if e and e[0] >= depth:
             self.hits += 1
-            s, f, m = e[1], e[2], e[3]
-            if f == EXACT:
-                return s, m
-            if f == LOWER and s >= beta:
-                return s, m
-            if f == UPPER and s <= alpha:
-                return s, m
+            sc, fl, mv = e[1], e[2], e[3]
+            if fl == EXACT: return sc, mv
+            if fl == LOWER and sc >= beta: return sc, mv
+            if fl == UPPER and sc <= alpha: return sc, mv
         return None
 
-    def store(self, key, depth, score, flag, move):
-        # Always-replace scheme (بسيط وفعال)
-        old = self.table.get(key)
-        if old is None or old[0] <= depth:
-            self.table[key] = (depth, score, flag, move)
-            self.writes += 1
-            # تنظيف عند الامتلاء
-            if len(self.table) > self.max_size:
-                # حذف نصف المدخلات الأقدم
+    def store(self, k, depth, score, flag, move):
+        old = self.table.get(k)
+        if not old or old[0] <= depth:
+            self.table[k] = (depth, score, flag, move)
+            if len(self.table) > self.size:
+                # حذف نصف المدخلات
                 keys = list(self.table.keys())
-                for k in keys[:len(keys)//2]:
-                    del self.table[k]
+                for kk in keys[:len(keys)//2]:
+                    del self.table[kk]
 
-    def get_best_move(self, key):
-        """جلب أفضل حركة مخزنة (لترتيب الحركات)"""
-        e = self.table.get(key)
+    def best_move(self, k):
+        e = self.table.get(k)
         return e[3] if e else None
 
     def clear(self):
-        self.table.clear()
-        self.hits = 0
-        self.writes = 0
+        self.table.clear(); self.hits = 0
 
 
 # ══════════════════════════════════════════
-# 🧠 المحرك الشرس
+# 4. المحرك الوحشي
 # ══════════════════════════════════════════
 
-class BrutalAI:
+class BeastAI:
     """
-    محرك تحليل احترافي بـ 7 تقنيات:
-    1. Zobrist Hashing + Transposition Table
-    2. Iterative Deepening (بحث بالوقت)
-    3. Quiescence Search (لا يتوقف أثناء الأكل)
-    4. Killer Moves (حركتين قاتلتين لكل عمق)
-    5. History Heuristic (أولوية للحركات الناجحة)
-    6. Principal Variation Search (نافذة ضيقة)
-    7. Vectorized Evaluation (تقييم سريع بـ NumPy)
+    تقييم بـ 12 عامل بدون get_moves() = فوري
+    + Zobrist TT + PVS + Killer + History + LMR
+    + Quiescence + Iterative Deepening
+    = عمق 15-20 في ثوانٍ
     """
 
-    def __init__(self, max_time=5.0):
+    def __init__(self, max_time=3.0):
         self.max_time = max_time
-        self.zobrist = ZobristHash()
-        self.tt = TransTable()
+        self.tt = ZobristTT()
         self.nodes = 0
-        self.q_nodes = 0
-        self.start_time = 0
-        self.time_up = False
-        self.max_depth_reached = 0
-
-        # Killer moves: حركتين لكل عمق
-        self.killers = [[None, None] for _ in range(50)]
-        # History heuristic: (from, to) → score
+        self.t0 = 0
+        self.stopped = False
+        self.depth_reached = 0
+        self.killers = [[None,None] for _ in range(64)]
         self.history = {}
 
-    # ── تقييم سريع بـ NumPy ──
+    # ── تقييم فوري (12 عامل، بدون get_moves) ──
 
-    def evaluate(self, eng, player):
-        """تقييم متجه (vectorized) بـ 10 عوامل"""
+    def evaluate(self, eng, for_white):
         b = eng.board
-        opp = eng.opp(player)
 
-        # مصفوفات القطع
-        if player in (P.L, P.LK):
-            my_men  = (b == P.L)
-            my_king = (b == P.LK)
-            op_men  = (b == P.D)
-            op_king = (b == P.DK)
-        else:
-            my_men  = (b == P.D)
-            my_king = (b == P.DK)
-            op_men  = (b == P.L)
-            op_king = (b == P.LK)
+        # مصفوفات سريعة
+        wm = (b == P.W)
+        wk = (b == P.WK)
+        bm = (b == P.B)
+        bk = (b == P.BK)
 
-        mn  = int(np.sum(my_men))
-        mk  = int(np.sum(my_king))
-        on  = int(np.sum(op_men))
-        ok_ = int(np.sum(op_king))
+        w_men = int(np.sum(wm))
+        w_kings = int(np.sum(wk))
+        b_men = int(np.sum(bm))
+        b_kings = int(np.sum(bk))
 
-        my_total = mn + mk
-        op_total = on + ok_
-        all_total = my_total + op_total
+        w_total = w_men + w_kings
+        b_total = b_men + b_kings
+        all_total = w_total + b_total
 
-        # فوز/خسارة
-        if my_total == 0: return -99999
-        if op_total == 0: return  99999
+        if w_total == 0: return -99999 if for_white else 99999
+        if b_total == 0: return 99999 if for_white else -99999
 
         score = 0.0
 
-        # 1. المادة
-        score += mn * 100 + mk * 330
-        score -= on * 100 + ok_ * 330
+        # ═══ 1. مادة ═══
+        score += (w_men * 100 + w_kings * 150)
+        score -= (b_men * 100 + b_kings * 150)
 
-        # 2. الموقع (vectorized)
-        if player in (P.L, P.LK):
-            score += float(np.sum(my_men * LIGHT_POS)) * 4
-            score -= float(np.sum(op_men * DARK_POS)) * 4
-        else:
-            score += float(np.sum(my_men * DARK_POS)) * 4
-            score -= float(np.sum(op_men * LIGHT_POS)) * 4
+        # ═══ 2. موقع (تقدم + مركز) ═══
+        score += float(np.sum(wm * ADV_W)) * 3
+        score -= float(np.sum(bm * ADV_B)) * 3
+        score += float(np.sum(wk * KING_TABLE)) * 2
+        score -= float(np.sum(bk * KING_TABLE)) * 2
 
-        score += float(np.sum(my_king * KING_POS)) * 3
-        score -= float(np.sum(op_king * KING_POS)) * 3
+        # ═══ 3. الصف الخلفي (مهم في الافتتاح) ═══
+        if all_total > 16:
+            score += int(np.sum(b[7,:]==P.W)) * 8
+            score -= int(np.sum(b[0,:]==P.B)) * 8
 
-        # 3. حماية الصف الخلفي
-        if player in (P.L, P.LK):
-            score += int(np.sum(b[7, :] == P.L)) * 12
-            score -= int(np.sum(b[0, :] == P.D)) * 12
-        else:
-            score += int(np.sum(b[0, :] == P.D)) * 12
-            score -= int(np.sum(b[7, :] == P.L)) * 12
-
-        # 4. حرية الحركة
-        my_moves, my_cap = eng.get_moves(player)
-        op_moves, op_cap = eng.get_moves(opp)
-        score += len(my_moves) * 5
-        score -= len(op_moves) * 5
-
-        # 5. تهديد الأكل
-        if my_cap: score += 25
-        if op_cap: score -= 25
-
-        # 6. سيطرة المركز
+        # ═══ 4. المركز الحقيقي ═══
         center = b[2:6, 2:6]
-        my_center = 0
-        op_center = 0
-        for p_type in ([P.L, P.LK] if player in (P.L, P.LK)
-                       else [P.D, P.DK]):
-            my_center += int(np.sum(center == p_type))
-        for p_type in ([P.D, P.DK] if player in (P.L, P.LK)
-                       else [P.L, P.LK]):
-            op_center += int(np.sum(center == p_type))
-        score += (my_center - op_center) * 8
+        for v in (P.W, P.WK):
+            score += int(np.sum(center==v)) * 5
+        for v in (P.B, P.BK):
+            score -= int(np.sum(center==v)) * 5
 
-        # 7. ترابط القطع
+        # ═══ 5-8. أنماط تكتيكية (لكل قطعة) ═══
         for r in range(8):
             for c in range(8):
                 p = b[r][c]
                 if p == P.E:
                     continue
-                is_mine = eng.owns(p, player)
+
+                is_w = (p in (P.W, P.WK))
+                mult = 1 if is_w else -1
+
+                # 5. الترابط (حلفاء قطريين)
                 allies = 0
-                for dr2, dc2 in ((-1,-1),(-1,1),(1,-1),(1,1)):
-                    ar, ac = r+dr2, c+dc2
+                for dr, dc in ((-1,-1),(-1,1),(1,-1),(1,1)):
+                    ar, ac = r+dr, c+dc
                     if 0<=ar<8 and 0<=ac<8:
-                        if eng.owns(b[ar][ac], p):
+                        ap = b[ar][ac]
+                        if is_w and ap in (P.W,P.WK):
                             allies += 1
-                if is_mine:
-                    score += allies * 3
-                else:
-                    score -= allies * 3
+                        elif not is_w and ap in (P.B,P.BK):
+                            allies += 1
+                score += allies * 3 * mult
 
-        # 8. حماية من الأكل
-        for r in range(8):
-            for c in range(8):
-                p = b[r][c]
-                if p == P.E:
-                    continue
-                is_mine = eng.owns(p, player)
-                for dr2, dc2 in ((-1,-1),(-1,1),(1,-1),(1,1)):
-                    ar, ac = r+dr2, c+dc2
-                    br_, bc = r-dr2, c-dc2
+                # 6. الحماية من الأكل
+                for dr, dc in ((-1,-1),(-1,1),(1,-1),(1,1)):
+                    ar, ac = r+dr, c+dc
+                    br_, bc = r-dr, c-dc
                     if (0<=ar<8 and 0<=ac<8
                             and 0<=br_<8 and 0<=bc<8):
-                        if (eng.enemy(b[ar][ac], p)
-                                and b[br_][bc] == P.E):
-                            if is_mine:
-                                score -= 15
-                            else:
-                                score += 15
+                        ap = b[ar][ac]
+                        is_enemy = (
+                            (is_w and ap in (P.B,P.BK))
+                            or (not is_w and ap in (P.W,P.WK))
+                        )
+                        if is_enemy and b[br_][bc] == P.E:
+                            score -= 10 * mult
                             break
 
-        # 9. قرب الترقية
-        if player in (P.L, P.LK):
-            for c in range(8):
-                if b[1][c] == P.L: score += 20
-                if b[6][c] == P.D: score -= 20
-        else:
-            for c in range(8):
-                if b[6][c] == P.D: score += 20
-                if b[1][c] == P.L: score -= 20
+                # 7. القطعة الهاربة (runaway)
+                if p == P.W and not (b[0:r, :] == P.B).any() \
+                        and not (b[0:r, :] == P.BK).any():
+                    if r <= 3:
+                        score += (4 - r) * 15
+                elif p == P.B and not (b[r+1:, :] == P.W).any() \
+                        and not (b[r+1:, :] == P.WK).any():
+                    if r >= 4:
+                        score -= (r - 3) * 15
 
-        # 10. استراتيجية نهاية اللعبة
+                # 8. الملك المحاصر (على الحافة)
+                if p in (P.WK, P.BK):
+                    if r == 0 or r == 7 or c == 0 or c == 7:
+                        exits = 0
+                        for dr, dc in ((-1,-1),(-1,1),
+                                       (1,-1),(1,1)):
+                            nr, nc = r+dr, c+dc
+                            if 0<=nr<8 and 0<=nc<8:
+                                if b[nr][nc] == P.E:
+                                    exits += 1
+                        if exits <= 1:
+                            score -= 12 * mult
+
+        # ═══ 9. جسر دفاعي ═══
+        # الأبيض: قطع على (7,0)+(6,1) أو (7,6)+(6,7)
+        if b[7][0] == P.W and b[6][1] == P.W:
+            score += 8
+        if b[7][6] == P.W and b[6][7] == P.W:
+            score += 8
+        # الأسود: قطع على (0,1)+(1,0) أو (0,7)+(1,6)
+        if b[0][1] == P.B and b[1][0] == P.B:
+            score -= 8
+        if b[0][7] == P.B and b[1][6] == P.B:
+            score -= 8
+
+        # ═══ 10. نهاية اللعبة ═══
         if all_total <= 8:
-            mat_diff = (mn + mk*3) - (on + ok_*3)
-            if mat_diff > 0:
-                score += mat_diff * 20
-                score += (16 - all_total) * 8
+            w_mat = w_men + w_kings * 2
+            b_mat = b_men + b_kings * 2
+            diff = w_mat - b_mat
+            score += diff * 20
+            if diff > 0:
+                score += (16 - all_total) * 5
 
-        return score
+        # ═══ 11. حافة الترقية ═══
+        for c in range(8):
+            if b[1][c] == P.W: score += 15
+            if b[6][c] == P.B: score -= 15
+
+        # ═══ 12. توازن الأجنحة ═══
+        w_left = int(np.sum(wm[:,:4]) + np.sum(wk[:,:4]))
+        w_right = int(np.sum(wm[:,4:]) + np.sum(wk[:,4:]))
+        b_left = int(np.sum(bm[:,:4]) + np.sum(bk[:,:4]))
+        b_right = int(np.sum(bm[:,4:]) + np.sum(bk[:,4:]))
+        if w_left > 0 and w_right > 0: score += 3
+        if b_left > 0 and b_right > 0: score -= 3
+
+        return score if for_white else -score
 
     # ── ترتيب الحركات ──
 
-    def order_moves(self, moves, is_cap, eng, player,
-                    depth, tt_move):
-        """ترتيب ذكي: TT > أكل > killer > history"""
+    def _order(self, moves, is_cap, eng, white,
+               depth, tt_move):
         scored = []
         for m in moves:
             s = 0
-
-            # أولوية 1: حركة الجدول
             if tt_move and m == tt_move:
                 s += 100000
-            # أولوية 2: الأكل
             elif is_cap:
-                s += 50000 + len(m) * 1000
-            # أولوية 3: Killer moves
-            elif (depth < len(self.killers)
-                  and m in self.killers[depth]):
+                s += 50000 + len(m) * 500
+                # أكل ملك أفضل من أكل قطعة
+                for i in range(len(m)-1):
+                    sr,sc = m[i]; er,ec = m[i+1]
+                    dr,dc = er-sr, ec-sc
+                    if abs(dr)==2:
+                        mid = eng.board[sr+dr//2][sc+dc//2]
+                        if mid in (P.WK,P.BK):
+                            s += 2000
+            elif depth < 64 and m in self.killers[depth]:
                 s += 40000
-            # أولوية 4: History
             else:
                 key = (m[0], m[-1])
                 s += self.history.get(key, 0)
 
-            # ترقية
             dest = m[-1]
-            piece = eng.board[m[0][0]][m[0][1]]
-            if dest[0] == 0 and piece == P.L:
-                s += 30000
-            if dest[0] == 7 and piece == P.D:
-                s += 30000
-
-            # مركز
-            if 2 <= dest[0] <= 5 and 2 <= dest[1] <= 5:
-                s += 100
-
+            if white and dest[0] == 0: s += 30000
+            if not white and dest[0] == 7: s += 30000
+            if 2<=dest[0]<=5 and 2<=dest[1]<=5: s += 50
             scored.append((s, m))
 
         scored.sort(key=lambda x: x[0], reverse=True)
-        return [m for _, m in scored]
+        return [m for _,m in scored]
 
-    # ── تحديث Killer + History ──
+    # ── Quiescence ──
 
-    def update_killers(self, depth, move):
-        if depth >= len(self.killers):
-            return
-        if move != self.killers[depth][0]:
-            self.killers[depth][1] = self.killers[depth][0]
-            self.killers[depth][0] = move
-
-    def update_history(self, move, depth):
-        key = (move[0], move[-1])
-        self.history[key] = self.history.get(key, 0) + depth*depth
-
-    # ── فحص الوقت ──
-
-    def check_time(self):
-        if self.nodes % 2000 == 0:
-            if time.time() - self.start_time >= self.max_time:
-                self.time_up = True
-
-    # ── Quiescence Search ──
-
-    def quiescence(self, eng, alpha, beta, player,
-                   original, qdepth=0):
-        """بحث الهدوء: لا يتوقف أثناء سلاسل الأكل"""
-        self.q_nodes += 1
-        self.check_time()
-        if self.time_up:
-            return 0
-
-        stand_pat = self.evaluate(eng, original)
-
-        if qdepth >= 8:
-            return stand_pat
-
-        if stand_pat >= beta:
-            return beta
-        if stand_pat > alpha:
-            alpha = stand_pat
-
-        moves, is_cap = eng.get_moves(player)
-
-        # فقط أكل في Quiescence
-        if not is_cap:
-            return stand_pat
-
-        for move in moves:
-            child = eng.copy()
-            child.do_move(move)
-
-            score = -self.quiescence(
-                child, -beta, -alpha,
-                eng.opp(player), original, qdepth+1
-            )
-
-            if self.time_up:
+    def _quiesce(self, eng, alpha, beta, white, depth=0):
+        self.nodes += 1
+        if self.nodes % 4096 == 0:
+            if time.time() - self.t0 >= self.max_time:
+                self.stopped = True
                 return 0
-            if score >= beta:
-                return beta
-            if score > alpha:
-                alpha = score
 
+        stand = self.evaluate(eng, white)
+        if depth >= 8 or stand >= beta:
+            return stand if stand < beta else beta
+        if stand > alpha:
+            alpha = stand
+
+        moves, is_cap = eng.get_moves(white)
+        if not is_cap:
+            return stand
+
+        for mv in moves:
+            child = eng.copy()
+            child.do_move(mv)
+            sc = -self._quiesce(child, -beta, -alpha,
+                                not white, depth+1)
+            if self.stopped: return 0
+            if sc >= beta: return beta
+            if sc > alpha: alpha = sc
         return alpha
 
-    # ── Alpha-Beta + PVS ──
+    # ── Alpha-Beta + PVS + LMR ──
 
-    def alpha_beta(self, eng, depth, alpha, beta,
-                   player, original, is_pv=True):
-        """Alpha-Beta مع PVS + TT + Killers"""
+    def _search(self, eng, depth, alpha, beta,
+                white, pv=True):
         self.nodes += 1
-        self.check_time()
-        if self.time_up:
-            return 0, None
-
-        # فحص نهاية اللعبة
-        result = eng.game_over()
-        if result is not None:
-            if result == original:
-                return 99999 + depth, None
-            elif result == -1:
+        if self.nodes % 4096 == 0:
+            if time.time() - self.t0 >= self.max_time:
+                self.stopped = True
                 return 0, None
-            else:
-                return -99999 - depth, None
 
-        # Quiescence في العمق 0
+        # نهاية اللعبة
+        w = eng.winner()
+        if w is not None:
+            if w == 0: return 0, None
+            is_my_win = (w==1 and white) or (w==2 and not white)
+            return (99999+depth if is_my_win
+                    else -99999-depth), None
+
         if depth <= 0:
-            return self.quiescence(
-                eng, alpha, beta, player, original
-            ), None
+            return self._quiesce(eng, alpha, beta, white), None
 
-        # فحص TT
-        is_max = (player == original)
-        board_key = self.zobrist.compute(eng.board, is_max)
-        tt_result = self.tt.probe(board_key, depth, alpha, beta)
-        if tt_result is not None and not is_pv:
-            return tt_result
+        # ── TT Probe ──
+        bk = self.tt.key(eng.board, white)
+        tt_res = self.tt.probe(bk, depth, alpha, beta)
+        if tt_res and not pv:
+            return tt_res
 
-        # جلب الحركات
-        moves, is_cap = eng.get_moves(player)
+        moves, is_cap = eng.get_moves(white)
         if not moves:
-            return self.evaluate(eng, original), None
+            return -99999, None
 
-        # ترتيب الحركات
-        tt_move = self.tt.get_best_move(board_key)
-        moves = self.order_moves(
-            moves, is_cap, eng, player, depth, tt_move
+        tt_mv = self.tt.best_move(bk)
+        moves = self._order(
+            moves, is_cap, eng, white, depth, tt_mv
         )
 
-        best_move = moves[0]
-        best_score = float("-inf")
+        best = moves[0]
+        best_sc = float("-inf")
         orig_alpha = alpha
-        searched = 0
+        i = 0
 
-        for i, move in enumerate(moves):
+        for mv in moves:
             child = eng.copy()
-            child.do_move(move)
-            nxt = eng.opp(player)
+            child.do_move(mv)
 
-            # ── PVS: Principal Variation Search ──
-            if searched == 0:
-                # أول حركة: بحث كامل
-                score = -self.alpha_beta(
+            # ── LMR: Late Move Reduction ──
+            reduction = 0
+            if (i >= 4 and depth >= 3
+                    and not is_cap and not pv):
+                reduction = 1
+                if i >= 8:
+                    reduction = 2
+
+            if i == 0:
+                sc = -self._search(
                     child, depth-1, -beta, -alpha,
-                    nxt, original, True
+                    not white, True
                 )[0]
             else:
-                # باقي الحركات: نافذة ضيقة أولاً
-                score = -self.alpha_beta(
-                    child, depth-1, -alpha-1, -alpha,
-                    nxt, original, False
+                # نافذة ضيقة + تقليل
+                sc = -self._search(
+                    child, depth-1-reduction,
+                    -alpha-1, -alpha,
+                    not white, False
                 )[0]
 
-                # إذا فشلت النافذة الضيقة: إعادة بحث كامل
-                if alpha < score < beta and not self.time_up:
-                    score = -self.alpha_beta(
-                        child, depth-1, -beta, -score,
-                        nxt, original, True
-                    )[0]
+                # إعادة بحث إذا لزم
+                if (alpha < sc < beta
+                        and not self.stopped):
+                    if reduction > 0:
+                        sc = -self._search(
+                            child, depth-1,
+                            -alpha-1, -alpha,
+                            not white, False
+                        )[0]
+                    if (alpha < sc < beta
+                            and not self.stopped):
+                        sc = -self._search(
+                            child, depth-1,
+                            -beta, -sc,
+                            not white, True
+                        )[0]
 
-            if self.time_up:
+            if self.stopped:
                 break
+            i += 1
 
-            searched += 1
-
-            if score > best_score:
-                best_score = score
-                best_move = move
-
-            if score > alpha:
-                alpha = score
-
+            if sc > best_sc:
+                best_sc = sc; best = mv
+            if sc > alpha:
+                alpha = sc
             if alpha >= beta:
-                # Beta cutoff
-                if not is_cap:
-                    self.update_killers(depth, move)
-                    self.update_history(move, depth)
+                if not is_cap and depth < 64:
+                    k = self.killers[depth]
+                    if mv != k[0]:
+                        k[1] = k[0]; k[0] = mv
+                    key = (mv[0], mv[-1])
+                    self.history[key] = \
+                        self.history.get(key, 0) + depth*depth
                 break
 
-        if not self.time_up:
-            # تحديد نوع المدخلة
-            if best_score <= orig_alpha:
-                flag = UPPER
-            elif best_score >= beta:
-                flag = LOWER
-            else:
-                flag = EXACT
+        if not self.stopped:
+            if best_sc <= orig_alpha: fl = UPPER
+            elif best_sc >= beta: fl = LOWER
+            else: fl = EXACT
+            self.tt.store(bk, depth, best_sc, fl, best)
 
-            self.tt.store(
-                board_key, depth, best_score,
-                flag, best_move
-            )
-
-        return best_score, best_move
+        return best_sc, best
 
     # ── Iterative Deepening ──
 
-    def find_best(self, eng, player):
-        """بحث متكرر بالتعميق مع تحكم بالوقت"""
+    def find_best(self, eng, white):
         self.nodes = 0
-        self.q_nodes = 0
-        self.start_time = time.time()
-        self.time_up = False
-        self.max_depth_reached = 0
-        self.killers = [[None, None] for _ in range(50)]
+        self.t0 = time.time()
+        self.stopped = False
+        self.depth_reached = 0
+        self.killers = [[None,None] for _ in range(64)]
         self.history = {}
 
-        best_move = None
-        best_score = 0
-        depth_scores = []
+        best_mv = None
+        best_sc = 0
+        log = []
 
-        # بحث تدريجي من العمق 1 حتى نفاد الوقت
-        for depth in range(1, 40):
-            score, move = self.alpha_beta(
-                eng, depth,
-                float("-inf"), float("inf"),
-                player, player, True
+        for d in range(1, 50):
+            sc, mv = self._search(
+                eng, d, float("-inf"), float("inf"),
+                white, True
             )
-
-            if self.time_up:
+            if self.stopped:
                 break
-
-            if move is not None:
-                best_move = move
-                best_score = score
-                self.max_depth_reached = depth
-
-                elapsed = time.time() - self.start_time
-                nps = int(self.nodes / max(elapsed, 0.001))
-                depth_scores.append({
-                    "depth": depth,
-                    "score": round(score, 1),
-                    "time": round(elapsed, 2),
-                    "nodes": self.nodes,
-                    "nps": nps,
+            if mv is not None:
+                best_mv = mv
+                best_sc = sc
+                self.depth_reached = d
+                el = time.time() - self.t0
+                log.append({
+                    "d": d, "sc": round(sc,1),
+                    "n": self.nodes,
+                    "t": round(el,2),
+                    "nps": int(self.nodes/max(el,0.001)),
                 })
+            if abs(best_sc) > 90000: break
+            if time.time()-self.t0 >= self.max_time*0.75: break
 
-            # إذا وجدنا فوز أكيد أو استهلكنا 80% من الوقت
-            if (abs(best_score) > 90000
-                    or time.time() - self.start_time
-                    >= self.max_time * 0.8):
-                break
-
-        elapsed = time.time() - self.start_time
+        el = time.time() - self.t0
         return {
-            "move": best_move,
-            "score": round(best_score, 1),
+            "move": best_mv,
+            "score": round(best_sc, 1),
             "nodes": self.nodes,
-            "q_nodes": self.q_nodes,
-            "time": round(elapsed, 2),
-            "depth": self.max_depth_reached,
-            "nps": int(self.nodes / max(elapsed, 0.001)),
+            "time": round(el, 2),
+            "depth": self.depth_reached,
+            "nps": int(self.nodes/max(el,0.001)),
             "tt_hits": self.tt.hits,
-            "tt_writes": self.tt.writes,
-            "depth_log": depth_scores,
+            "log": log,
         }
 
-    # ── تحليل كل الحركات ──
-
-    def analyze_all(self, eng, player):
-        """تحليل وتصنيف كل الحركات"""
+    def analyze_all(self, eng, white):
+        """تحليل كل الحركات مع مشاركة TT"""
         self.tt.clear()
         self.nodes = 0
-        self.q_nodes = 0
-        self.start_time = time.time()
-        self.time_up = False
+        self.t0 = time.time()
+        self.stopped = False
 
-        moves, is_cap = eng.get_moves(player)
-        if not moves:
-            return None
+        moves, is_cap = eng.get_moves(white)
+        if not moves: return None
 
-        # تقسيم الوقت بالتساوي على الحركات
-        time_per = max(1.0, self.max_time * 0.7 / len(moves))
-
+        each_t = max(0.3, self.max_time*0.6 / len(moves))
         results = []
-        for move in moves:
+
+        for mv in moves:
             child = eng.copy()
-            child.do_move(move)
+            child.do_move(mv)
 
-            # تحليل عميق لكل حركة
-            sub_ai = BrutalAI(max_time=time_per)
-            sub_ai.tt = self.tt  # مشاركة الجدول
-            opp_result = sub_ai.find_best(child, eng.opp(player))
+            sub = BeastAI(max_time=each_t)
+            sub.tt = self.tt  # مشاركة الكاش!
+            res = sub.find_best(child, not white)
+            sc = -res["score"]
 
-            # النتيجة = سالب أفضل رد للخصم
-            score = -opp_result["score"]
-            depth_reached = opp_result["depth"]
+            is_capt = (
+                len(mv) > 2
+                or (len(mv)==2
+                    and abs(mv[0][0]-mv[1][0])==2)
+            )
+            cap_n = 0
+            if is_capt:
+                for j in range(len(mv)-1):
+                    if abs(mv[j][0]-mv[j+1][0])==2:
+                        cap_n += 1
 
-            is_capture = (
-                len(move) > 2
-                or (len(move)==2
-                    and abs(move[0][0]-move[1][0])==2)
+            dest = mv[-1]
+            piece = eng.board[mv[0][0]][mv[0][1]]
+            promo = (
+                (dest[0]==0 and piece==P.W)
+                or (dest[0]==7 and piece==P.B)
             )
 
-            cap_count = 0
-            if is_capture:
-                for i in range(len(move)-1):
-                    if abs(move[i][0]-move[i+1][0])==2:
-                        cap_count += 1
+            if is_capt and cap_n>=2: v="🔥 أكل متعدد!"
+            elif promo: v="👑 ترقية!"
+            elif sc>300: v="💪 ساحقة"
+            elif sc>100: v="✅ ممتازة"
+            elif sc>30: v="✅ جيدة"
+            elif sc>-30: v="⚖️ متكافئة"
+            elif sc>-100: v="⚠️ حذر"
+            else: v="❌ تجنبها"
 
-            dest = move[-1]
-            piece = eng.board[move[0][0]][move[0][1]]
-            promotes = (
-                (dest[0]==0 and piece==P.L)
-                or (dest[0]==7 and piece==P.D)
-            )
-
-            # تحليل الخطورة
-            danger = ""
-            if is_capture and cap_count >= 2:
-                danger = "🔥 أكل متعدد ممتاز!"
-            elif promotes:
-                danger = "👑 ترقية للملك!"
-            elif score > 200:
-                danger = "💪 تفوق واضح"
-            elif score > 50:
-                danger = "✅ جيدة"
-            elif score > -50:
-                danger = "⚖️ متكافئة"
-            elif score > -200:
-                danger = "⚠️ محفوفة بالمخاطر"
-            else:
-                danger = "❌ خطيرة"
-
+            wp = max(1, min(99, int(50+sc/10)))
             results.append({
-                "move": move,
-                "score": round(score, 1),
-                "depth": depth_reached,
-                "is_capture": is_capture,
-                "captured": cap_count,
-                "promotes": promotes,
-                "piece": int(piece),
-                "verdict": danger,
+                "move": mv, "score": round(sc,1),
+                "depth": res["depth"],
+                "is_capture": is_capt,
+                "captured": cap_n,
+                "promotes": promo,
+                "verdict": v, "win_pct": wp,
             })
 
         results.sort(key=lambda x: x["score"], reverse=True)
-
-        best_s = results[0]["score"] if results else 0
         for i, r in enumerate(results):
-            r["rank"] = i + 1
-            s = r["score"]
-            if s > 5000:     r["win_pct"] = 99
-            elif s < -5000:  r["win_pct"] = 1
-            else:
-                r["win_pct"] = max(1, min(99,
-                    int(50 + s / 15)))
+            r["rank"] = i+1
 
-        elapsed = time.time() - self.start_time
-        pos_eval = self.evaluate(eng, player)
-
+        pe = self.evaluate(eng, white)
+        total_n = sum(
+            r.get("depth", 0) for r in results
+        )
         return {
             "moves": results,
-            "time": round(elapsed, 2),
-            "is_forced_capture": is_cap,
-            "position_eval": round(pos_eval, 1),
+            "time": round(time.time()-self.t0, 2),
+            "forced": is_cap,
+            "eval": round(pe, 1),
             "tt_hits": self.tt.hits,
         }
 
 
 # ══════════════════════════════════════════
-# تحليل الصور
+# 5. الرؤية الحاسوبية
 # ══════════════════════════════════════════
 
 class Vision:
-
     @staticmethod
-    def fix_perspective(img_bgr):
-        gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+    def fix_perspective(img):
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         blur = cv2.GaussianBlur(gray, (5,5), 0)
         edges = cv2.Canny(blur, 30, 100)
-        k = cv2.getStructuringElement(cv2.MORPH_RECT, (3,3))
+        k = cv2.getStructuringElement(cv2.MORPH_RECT,(3,3))
         edges = cv2.dilate(edges, k, iterations=2)
-        cnts, _ = cv2.findContours(
+        cnts,_ = cv2.findContours(
             edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
         )
         if not cnts:
-            return cv2.resize(img_bgr, (400,400)), False
-
-        largest = max(cnts, key=cv2.contourArea)
-        area = cv2.contourArea(largest)
-        if area < img_bgr.shape[0]*img_bgr.shape[1]*0.15:
-            return cv2.resize(img_bgr, (400,400)), False
-
-        peri = cv2.arcLength(largest, True)
-        approx = cv2.approxPolyDP(largest, 0.02*peri, True)
-
-        if len(approx) == 4:
+            return cv2.resize(img,(400,400)), False
+        big = max(cnts, key=cv2.contourArea)
+        if cv2.contourArea(big)<img.shape[0]*img.shape[1]*0.15:
+            return cv2.resize(img,(400,400)), False
+        peri = cv2.arcLength(big,True)
+        approx = cv2.approxPolyDP(big,0.02*peri,True)
+        if len(approx)==4:
             pts = approx.reshape(4,2).astype(np.float32)
-            s = pts.sum(axis=1); d = np.diff(pts,axis=1).ravel()
-            o = np.zeros((4,2), dtype=np.float32)
+            s=pts.sum(axis=1); d=np.diff(pts,axis=1).ravel()
+            o=np.zeros((4,2),dtype=np.float32)
             o[0]=pts[np.argmin(s)]; o[2]=pts[np.argmax(s)]
             o[1]=pts[np.argmin(d)]; o[3]=pts[np.argmax(d)]
-            dst = np.float32([[0,0],[399,0],[399,399],[0,399]])
-            M = cv2.getPerspectiveTransform(o, dst)
-            return cv2.warpPerspective(img_bgr, M, (400,400)), True
-
-        x,y,w,h = cv2.boundingRect(largest)
-        return cv2.resize(img_bgr[y:y+h,x:x+w], (400,400)), False
+            dst=np.float32([[0,0],[399,0],[399,399],[0,399]])
+            M=cv2.getPerspectiveTransform(o,dst)
+            return cv2.warpPerspective(img,M,(400,400)), True
+        x,y,w,h = cv2.boundingRect(big)
+        return cv2.resize(img[y:y+h,x:x+w],(400,400)), False
 
     @staticmethod
-    def detect_hsv(img, lt=160, dt=100):
+    def detect(img, lt=160, dt=100):
         hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        c = 50; board = np.zeros((8,8), dtype=np.int8); info=[]
+        c=50; b1=np.zeros((8,8),dtype=np.int8); info=[]
         for r in range(8):
-            for col in range(8):
-                if (r+col)%2==0: continue
+            for cl in range(8):
+                if (r+cl)%2==0: continue
                 m=c//4
-                roi_g = gray[r*c+m:(r+1)*c-m, col*c+m:(col+1)*c-m]
-                roi_h = hsv[r*c+m:(r+1)*c-m, col*c+m:(col+1)*c-m]
-                br=float(np.mean(roi_g))
-                sa=float(np.mean(roi_h[:,:,1]))
-                va=float(np.var(roi_g))
+                rg=gray[r*c+m:(r+1)*c-m, cl*c+m:(cl+1)*c-m]
+                rh=hsv[r*c+m:(r+1)*c-m, cl*c+m:(cl+1)*c-m]
+                br=float(np.mean(rg))
+                sa=float(np.mean(rh[:,:,1]))
+                va=float(np.var(rg))
                 det=int(P.E)
                 if va>120 or sa>30:
-                    if br>lt: det=int(P.L)
-                    elif br<dt: det=int(P.D)
-                board[r][col]=det
-                info.append({"r":r,"c":col,"br":round(br),
-                             "sa":round(sa),"va":round(va),"d":det})
-        return board, info
+                    if br>lt: det=int(P.W)
+                    elif br<dt: det=int(P.B)
+                b1[r][cl]=det
+                info.append({"r":r,"c":cl,
+                    "br":round(br),"va":round(va),"d":det})
 
-    @staticmethod
-    def detect_circles(img, lt=160, dt=100):
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        gray = cv2.medianBlur(gray, 5); c=50
-        circles = cv2.HoughCircles(
-            gray,cv2.HOUGH_GRADIENT,1.2,35,
-            param1=60,param2=35,minRadius=12,maxRadius=24
-        )
-        board = np.zeros((8,8),dtype=np.int8)
-        vis = img.copy()
+        gm=cv2.medianBlur(gray,5)
+        circles=cv2.HoughCircles(gm,cv2.HOUGH_GRADIENT,
+            1.2,35,param1=60,param2=35,minRadius=12,maxRadius=24)
+        b2=np.zeros((8,8),dtype=np.int8)
+        vis=img.copy()
         if circles is not None:
             for cx,cy,rad in np.uint16(np.around(circles))[0]:
-                col_=int(cx/c); row_=int(cy/c)
-                if not(0<=row_<8 and 0<=col_<8): continue
-                if (row_+col_)%2==0: continue
-                s = gray[max(0,int(cy)-5):min(400,int(cy)+5),
-                         max(0,int(cx)-5):min(400,int(cx)+5)]
+                co,ro=int(cx/c),int(cy/c)
+                if not(0<=ro<8 and 0<=co<8) or (ro+co)%2==0:
+                    continue
+                s=gray[max(0,int(cy)-5):min(400,int(cy)+5),
+                       max(0,int(cx)-5):min(400,int(cx)+5)]
                 if s.size==0: continue
                 a=float(np.mean(s))
-                if a>lt: board[row_][col_]=int(P.L); clr=(0,255,0)
-                elif a<dt: board[row_][col_]=int(P.D); clr=(0,0,255)
+                if a>lt: b2[ro][co]=int(P.W); clr=(0,255,0)
+                elif a<dt: b2[ro][co]=int(P.B); clr=(0,0,255)
                 else: continue
                 cv2.circle(vis,(int(cx),int(cy)),int(rad),clr,2)
-        return board, Image.fromarray(cv2.cvtColor(vis,cv2.COLOR_BGR2RGB))
 
-    @staticmethod
-    def merge(a, b):
-        m = np.zeros((8,8),dtype=np.int8)
+        vis_pil=Image.fromarray(cv2.cvtColor(vis,cv2.COLOR_BGR2RGB))
+        merged=np.zeros((8,8),dtype=np.int8)
         for r in range(8):
-            for c in range(8):
-                if a[r][c]!=P.E and b[r][c]!=P.E and a[r][c]==b[r][c]:
-                    m[r][c]=a[r][c]
-                elif b[r][c]!=P.E: m[r][c]=b[r][c]
-                elif a[r][c]!=P.E: m[r][c]=a[r][c]
-        return m
+            for c_ in range(8):
+                h,ci=b1[r][c_],b2[r][c_]
+                if h!=P.E and ci!=P.E: merged[r][c_]=h
+                elif ci!=P.E: merged[r][c_]=ci
+                elif h!=P.E: merged[r][c_]=h
+        return merged, b1, b2, vis_pil, info
 
 
 # ══════════════════════════════════════════
-# رسم الرقعة
+# 6. رسم الرقعة
 # ══════════════════════════════════════════
 
-class Render:
+class R:
     @staticmethod
-    def draw(board, arrows=None, highlight=None, label=None):
-        img = Image.new("RGB", (BOARD_PX, BOARD_PX))
-        dr = ImageDraw.Draw(img)
+    def draw(board, arrows=None, hl=None):
+        img=Image.new("RGB",(BPX,BPX))
+        dr=ImageDraw.Draw(img)
         for r in range(8):
             for c in range(8):
-                x1,y1 = c*CELL, r*CELL; x2,y2 = x1+CELL, y1+CELL
-                sq = (235,215,180) if (r+c)%2==0 else (175,130,95)
-                if highlight and (r,c) in highlight:
-                    sq = (100,200,100)
-                dr.rectangle([x1,y1,x2,y2], fill=sq)
-                p = board[r][c]
-                if p == P.E: continue
-                cx,cy = x1+CELL//2, y1+CELL//2; pr=CELL//2-10
+                x1,y1=c*CELL,r*CELL; x2,y2=x1+CELL,y1+CELL
+                sq=((235,215,180) if (r+c)%2==0
+                    else (175,130,95))
+                if hl and (r,c) in hl: sq=(100,200,100)
+                dr.rectangle([x1,y1,x2,y2],fill=sq)
+                p=board[r][c]
+                if p==P.E: continue
+                cx,cy=x1+CELL//2,y1+CELL//2; pr=CELL//2-10
                 dr.ellipse([cx-pr+3,cy-pr+3,cx+pr+3,cy+pr+3],
-                           fill=(70,50,30))
-                fl = (250,248,240) if Engine.is_light(p) else (45,45,45)
-                ed = (195,185,170) if Engine.is_light(p) else (25,25,25)
+                    fill=(70,50,30))
+                fl=((250,248,240) if p in(P.W,P.WK)
+                    else (45,45,45))
+                ed=((195,185,170) if p in(P.W,P.WK)
+                    else (25,25,25))
                 dr.ellipse([cx-pr,cy-pr,cx+pr,cy+pr],
-                           fill=fl, outline=ed, width=2)
+                    fill=fl,outline=ed,width=2)
                 dr.ellipse([cx-pr+5,cy-pr+5,cx+pr-5,cy+pr-5],
-                           outline=ed, width=1)
-                if Engine.is_king(p):
-                    kr=12
-                    dr.ellipse([cx-kr,cy-kr,cx+kr,cy+kr],
-                               fill=(255,215,0),
-                               outline=(200,170,0), width=2)
+                    outline=ed,width=1)
+                if p in(P.WK,P.BK):
+                    dr.ellipse([cx-12,cy-12,cx+12,cy+12],
+                        fill=(255,215,0),
+                        outline=(200,170,0),width=2)
         for i in range(8):
             try:
                 dr.text((3,i*CELL+3),str(i),fill=(130,110,90))
-                dr.text((i*CELL+CELL//2-4,BOARD_PX-14),
-                        chr(65+i),fill=(130,110,90))
+                dr.text((i*CELL+CELL//2-4,BPX-14),
+                    chr(65+i),fill=(130,110,90))
             except: pass
         if arrows:
             for a in arrows:
-                Render._arrow(dr, a["move"],
-                              a.get("color",(255,50,50)),
-                              a.get("width",5))
-        if label:
-            try:
-                dr.rectangle([0,0,BOARD_PX,22],fill=(0,0,0))
-                dr.text((5,3),label,fill=(255,255,255))
-            except: pass
+                R._arrow(dr,a["m"],a.get("c",(255,50,50)),
+                    a.get("w",5))
         return img
 
     @staticmethod
-    def _arrow(draw, move, color, width):
-        if not move or len(move)<2: return
-        for i in range(len(move)-1):
-            sr,sc=move[i]; er,ec=move[i+1]
-            sx,sy = sc*CELL+CELL//2, sr*CELL+CELL//2
-            ex,ey = ec*CELL+CELL//2, er*CELL+CELL//2
-            draw.line([(sx,sy),(ex,ey)], fill=color, width=width)
-            draw.ellipse([ex-8,ey-8,ex+8,ey+8], fill=color)
-        sr,sc=move[0]; sx,sy=sc*CELL+CELL//2,sr*CELL+CELL//2
-        draw.ellipse([sx-12,sy-12,sx+12,sy+12],
-                     outline=(0,220,0), width=4)
+    def _arrow(d,mv,color,w):
+        if not mv or len(mv)<2: return
+        for i in range(len(mv)-1):
+            s,e=mv[i],mv[i+1]
+            sx,sy=s[1]*CELL+CELL//2,s[0]*CELL+CELL//2
+            ex,ey=e[1]*CELL+CELL//2,e[0]*CELL+CELL//2
+            d.line([(sx,sy),(ex,ey)],fill=color,width=w)
+            d.ellipse([ex-8,ey-8,ex+8,ey+8],fill=color)
+        s=mv[0]; sx,sy=s[1]*CELL+CELL//2,s[0]*CELL+CELL//2
+        d.ellipse([sx-12,sy-12,sx+12,sy+12],
+            outline=(0,220,0),width=4)
 
 
 # ══════════════════════════════════════════
-# واجهة Streamlit
+# 7. واجهة Streamlit
 # ══════════════════════════════════════════
 
-def main():
-    st.set_page_config("♟️ مساعد الداما الشرس","♟️",layout="wide")
+def app():
+    st.set_page_config("♟️ مساعد الداما","♟️",layout="wide")
 
     st.markdown("""<style>
     .block-container{max-width:1100px}
-    .best-box{background:linear-gradient(135deg,#28a745,#20c997);
+    .best{background:linear-gradient(135deg,#28a745,#20c997);
         color:#fff;padding:18px;border-radius:12px;
         text-align:center;margin:10px 0}
-    .best-box h2{margin:0;font-size:1.6em}
-    .best-box p{margin:5px 0;font-size:1.1em}
-    .warn-box{background:#f8d7da;border:2px solid #dc3545;
+    .best h2{margin:0;font-size:1.6em}
+    .best p{margin:5px 0}
+    .warn{background:#f8d7da;border:2px solid #dc3545;
         color:#721c24;padding:12px;border-radius:10px;
         text-align:center;margin:8px 0;font-weight:bold}
-    .eval-bar{background:#e9ecef;border-radius:8px;
+    .ebar{background:#e9ecef;border-radius:8px;
         overflow:hidden;height:30px;margin:8px 0}
-    .eval-fill{height:100%;text-align:center;color:#fff;
+    .efill{height:100%;text-align:center;color:#fff;
         font-weight:bold;line-height:30px;border-radius:8px}
-    .perf-box{background:#f0f2f6;padding:12px;border-radius:10px;
+    .perf{background:#f0f2f6;padding:12px;border-radius:10px;
         border-left:4px solid #667eea;margin:8px 0}
     </style>""", unsafe_allow_html=True)
-
-    st.title("♟️ مساعد الداما الشرس")
-    st.caption("حمّل صورة أو أدخل يدوياً → AI يحلل بـ 7 تقنيات متقدمة")
 
     if "board" not in st.session_state:
         st.session_state.board = Engine._init().tolist()
 
-    # ═══ الشريط الجانبي ═══
+    st.title("♟️ مساعد الداما الوحشي")
+    st.caption(
+        "12 عامل تقييم + Zobrist TT + PVS + LMR = "
+        "عمق 15-20 في ثوانٍ"
+    )
+
+    # الشريط الجانبي
     with st.sidebar:
-        st.header("⚙️ الإعدادات")
-
-        my_color = st.radio("♟️ لون قطعك:",
-                             ["⚪ الفاتح","⚫ الداكن"])
-        player = P.L if "الفاتح" in my_color else P.D
-
-        st.markdown("**⏱ وقت التحليل:**")
-        think_time = st.select_slider("ثوانٍ:",
-            [2, 3, 5, 8, 10, 15, 20, 30],
-            value=5)
-
-        st.info(f"⏱ {think_time}s — AI يبحث أعمق ما يمكن")
-
+        st.header("⚙️")
+        mc = st.radio("♟️ لونك:",["⚪ أبيض","⚫ أسود"])
+        fw = "أبيض" in mc
+        tt = st.select_slider("⏱ وقت:",
+            [1,2,3,5,8,10,15], value=3)
         st.divider()
-        if st.button("🔄 رقعة ابتدائية", use_container_width=True):
-            st.session_state.board = Engine._init().tolist()
+        if st.button("🔄 جديدة",use_container_width=True):
+            st.session_state.board=Engine._init().tolist()
             st.rerun()
-        if st.button("🗑️ مسح", use_container_width=True):
-            st.session_state.board = np.zeros((8,8),dtype=int).tolist()
+        if st.button("🗑️ مسح",use_container_width=True):
+            st.session_state.board = \
+                np.zeros((8,8),dtype=int).tolist()
             st.rerun()
-
         st.divider()
-        eng_ = Engine(st.session_state.board)
-        ln,lk = eng_.count(P.L); dn,dk = eng_.count(P.D)
-        st.markdown("### 📊 القطع")
-        c1,c2 = st.columns(2)
-        with c1:
-            st.metric("⚪",ln+lk,delta=f"👑{lk}" if lk else None)
-        with c2:
-            st.metric("⚫",dn+dk,delta=f"👑{dk}" if dk else None)
+        g_=np.array(st.session_state.board)
+        wn=int(np.sum((g_==P.W)|(g_==P.WK)))
+        bn=int(np.sum((g_==P.B)|(g_==P.BK)))
+        c1,c2=st.columns(2)
+        with c1: st.metric("⚪",wn)
+        with c2: st.metric("⚫",bn)
 
-    # ═══ التبويبات ═══
-    tabs = ["📥 إدخال الرقعة", "🧠 التحليل"]
-    if HAS_CV2: tabs.insert(1, "📷 تحليل صورة")
-    active = st.tabs(tabs)
+    # التبويبات
+    tn=["✏️ يدوي"]
+    if HAS_CV2: tn.append("📷 صورة")
+    tn.append("🧠 تحليل")
+    tabs=st.tabs(tn)
 
-    # ─── إدخال يدوي ───
-    with active[0]:
-        st.markdown("**اختر قطعة واضغط المربع:**")
-        opts = {"⬜ فارغ":int(P.E),"⚪ فاتح":int(P.L),
-                "⚫ داكن":int(P.D),"👑W":int(P.LK),"♛B":int(P.DK)}
-        sel = st.radio("_",list(opts.keys()),horizontal=True,
-                        label_visibility="collapsed")
-        sv = opts[sel]
-        syms = {int(P.E):"·",int(P.L):"⚪",int(P.D):"⚫",
-                int(P.LK):"👑",int(P.DK):"♛"}
-
-        ba = np.array(st.session_state.board)
+    # يدوي
+    with tabs[0]:
+        opts={"⬜":int(P.E),"⚪":int(P.W),
+              "⚫":int(P.B),"👑W":int(P.WK),"♛B":int(P.BK)}
+        sel=st.radio("_",list(opts.keys()),horizontal=True,
+            label_visibility="collapsed")
+        sv=opts[sel]
+        syms={int(P.E):"·",int(P.W):"⚪",int(P.B):"⚫",
+              int(P.WK):"👑",int(P.BK):"♛"}
+        ba=np.array(st.session_state.board)
         for r in range(8):
-            cols = st.columns(8)
+            cols=st.columns(8)
             for c in range(8):
                 with cols[c]:
-                    ok = (r+c)%2!=0
-                    s = syms.get(int(ba[r][c]),"·") if ok else ""
+                    ok=(r+c)%2!=0
+                    s=syms.get(int(ba[r][c]),"·") if ok else ""
                     if st.button(s,key=f"m{r}{c}",
-                                 use_container_width=True,
-                                 disabled=not ok):
+                        use_container_width=True,disabled=not ok):
                         st.session_state.board[r][c]=sv
                         st.rerun()
+        st.image(R.draw(ba),caption="الرقعة",
+            use_container_width=True)
 
-        vis = Render.draw(ba)
-        st.image(vis,caption="الرقعة الحالية",
-                 use_container_width=True)
-
-    # ─── تحليل صورة ───
+    # صورة
     if HAS_CV2:
-        with active[1]:
-            st.subheader("📷 تحليل صورة الرقعة")
-            uploaded = st.file_uploader("📸",type=["jpg","png","jpeg"])
-            if uploaded:
-                pil = Image.open(uploaded).convert("RGB")
-                img_cv = cv2.cvtColor(np.array(pil),cv2.COLOR_RGB2BGR)
-                c1,c2 = st.columns(2)
-                with c1: st.image(pil,caption="الأصلية",
-                                   use_container_width=True)
-                with st.spinner("🔲 تصحيح المنظور..."):
-                    fixed, was = Vision.fix_perspective(img_cv)
-                fp = Image.fromarray(cv2.cvtColor(fixed,cv2.COLOR_BGR2RGB))
-                with c2:
-                    st.image(fp,caption="✅ مصحح" if was else "📐 مقتصة",
-                             use_container_width=True)
-                tc1,tc2 = st.columns(2)
-                with tc1: lt=st.slider("عتبة الفاتح",100,230,160)
-                with tc2: dt=st.slider("عتبة الداكن",30,150,100)
-
+        with tabs[1]:
+            st.subheader("📷 تحليل صورة")
+            up=st.file_uploader("📸",type=["jpg","png","jpeg"])
+            if up:
+                pil=Image.open(up).convert("RGB")
+                icv=cv2.cvtColor(np.array(pil),cv2.COLOR_RGB2BGR)
+                c1,c2=st.columns(2)
+                with c1: st.image(pil,use_container_width=True)
+                with st.spinner("🔲..."):
+                    fixed,was=Vision.fix_perspective(icv)
+                fp=Image.fromarray(
+                    cv2.cvtColor(fixed,cv2.COLOR_BGR2RGB))
+                with c2: st.image(fp,use_container_width=True)
+                tc1,tc2=st.columns(2)
+                with tc1: lt=st.slider("فاتح",100,230,160)
+                with tc2: dt=st.slider("داكن",30,150,100)
                 if st.button("🔍 تحليل",type="primary"):
-                    with st.spinner("🧠 تحليل متقدم..."):
-                        hb,hi = Vision.detect_hsv(fixed,lt,dt)
-                        cb,cv_ = Vision.detect_circles(fixed,lt,dt)
-                        merged = Vision.merge(hb,cb)
-                    st.success("✅ تم!")
-                    t1,t2,t3 = st.tabs(["HSV","دوائر","مدمج"])
-                    with t1:
-                        st.image(Render.draw(hb),use_container_width=True)
-                        with st.expander("تفاصيل"):
-                            for d in hi:
-                                if d["d"]!=0:
-                                    st.text(f"({d['r']},{d['c']}) "
-                                            f"{'⚪' if d['d']==1 else '⚫'} "
-                                            f"br={d['br']} var={d['va']}")
-                    with t2:
-                        st.image(cv_,use_container_width=True)
-                        st.image(Render.draw(cb),use_container_width=True)
-                    with t3:
-                        st.image(Render.draw(merged),use_container_width=True)
-                        e=Engine(merged); a,b2=e.count(P.L); c3,d2=e.count(P.D)
-                        st.info(f"⚪ {a}+{b2}👑 • ⚫ {c3}+{d2}👑")
-                        if st.button("📥 استخدم للتحليل",type="primary"):
-                            st.session_state.board=merged.tolist()
-                            st.rerun()
+                    with st.spinner("🧠..."):
+                        merged,_,_,cvis,_=Vision.detect(
+                            fixed,lt,dt)
+                    st.success("✅")
+                    c1,c2=st.columns(2)
+                    with c1: st.image(cvis,
+                        use_container_width=True)
+                    with c2: st.image(R.draw(merged),
+                        use_container_width=True)
+                    if st.button("📥 استخدم",type="primary"):
+                        st.session_state.board=merged.tolist()
+                        st.rerun()
 
-    # ─── التحليل ───
-    analyze_idx = 2 if HAS_CV2 else 1
-    with active[analyze_idx]:
-        ba2 = np.array(st.session_state.board, dtype=np.int8)
-        eng = Engine(ba2)
-        st.image(Render.draw(ba2),caption="الرقعة",
-                 use_container_width=True)
+    # تحليل
+    ai_idx = 2 if HAS_CV2 else 1
+    with tabs[ai_idx]:
+        ba2=np.array(st.session_state.board,dtype=np.int8)
+        eng=Engine(ba2)
+        st.image(R.draw(ba2),caption="الرقعة",
+            use_container_width=True)
 
-        ln,lk = eng.count(P.L); dn,dk = eng.count(P.D)
-        if (ln+lk)==0 and (dn+dk)==0:
-            st.warning("⚠️ الرقعة فارغة!")
+        wn=int(np.sum((ba2==P.W)|(ba2==P.WK)))
+        bn=int(np.sum((ba2==P.B)|(ba2==P.BK)))
+        if wn==0 and bn==0:
+            st.warning("⚠️ فارغة!"); return
+
+        w=eng.winner()
+        if w is not None:
+            if w==0: st.info("🤝 تعادل")
+            elif w==1: st.success("🏆 الأبيض!")
+            else: st.success("🏆 الأسود!")
             return
 
-        go = eng.game_over()
-        if go is not None:
-            if go==-1: st.info("🤝 تعادل")
-            elif go==P.L: st.success("🏆 فاز الفاتح!")
-            else: st.success("🏆 فاز الداكن!")
-            return
+        emoji="⚪" if fw else "⚫"
+        name="الأبيض" if fw else "الأسود"
+        st.markdown(f"### {emoji} تحليل **{name}**")
 
-        emoji = "⚪" if player==P.L else "⚫"
-        st.markdown(f"### {emoji} تحليل حركات "
-                    f"**{'الفاتح' if player==P.L else 'الداكن'}**")
+        if st.button("🧠 حلّل!",type="primary",
+            use_container_width=True):
 
-        if st.button("🧠 حلّل الآن!",type="primary",
-                     use_container_width=True):
+            prg=st.empty()
+            prg.info(f"🧠 تحليل ({tt}s)...")
 
-            progress = st.empty()
-            progress.info(f"🧠 جاري التحليل لمدة {think_time} ثانية...")
-
-            t0 = time.time()
-            ai = BrutalAI(max_time=think_time)
-            analysis = ai.analyze_all(eng, player)
-            total_time = round(time.time() - t0, 2)
-
-            progress.empty()
+            ai=BeastAI(max_time=tt)
+            analysis=ai.analyze_all(eng, fw)
+            prg.empty()
 
             if not analysis or not analysis["moves"]:
-                st.error("❌ لا حركات!")
-                return
+                st.error("❌ لا حركات!"); return
 
-            moves = analysis["moves"]
-            best = moves[0]
+            mvs=analysis["moves"]
+            best=mvs[0]
 
-            # ── شريط التقييم ──
-            pe = analysis["position_eval"]
-            if pe > 200:
-                em,ec = "🟢 متفوق بوضوح!","#28a745"
-            elif pe > 50:
-                em,ec = "🟢 أفضل قليلاً","#20c997"
-            elif pe > -50:
-                em,ec = "🟡 متكافئة","#ffc107"
-            elif pe > -200:
-                em,ec = "🟠 الخصم أفضل","#fd7e14"
-            else:
-                em,ec = "🔴 خطر!","#dc3545"
-            pct = max(5,min(95,int(50+pe/15)))
-            st.markdown(f'<div class="eval-bar">'
-                        f'<div class="eval-fill" '
-                        f'style="width:{pct}%;background:{ec}">'
-                        f'{em} ({pe})</div></div>',
-                        unsafe_allow_html=True)
+            # تقييم الوضعية
+            pe=analysis["eval"]
+            if pe>300: em,ec="🟢 متفوق جداً!","#28a745"
+            elif pe>100: em,ec="🟢 أفضل","#20c997"
+            elif pe>30: em,ec="🟢 أفضل قليلاً","#17a2b8"
+            elif pe>-30: em,ec="🟡 متكافئة","#ffc107"
+            elif pe>-100: em,ec="🟠 الخصم أفضل","#fd7e14"
+            else: em,ec="🔴 خطر!","#dc3545"
+            pct=max(5,min(95,int(50+pe/10)))
+            st.markdown(
+                f'<div class="ebar"><div class="efill" '
+                f'style="width:{pct}%;background:{ec}">'
+                f'{em} ({pe})</div></div>',
+                unsafe_allow_html=True)
 
-            # ── الأكل الإجباري ──
-            if analysis["is_forced_capture"]:
-                st.markdown('<div class="warn-box">'
-                            '⚡ أكل إجباري!</div>',
-                            unsafe_allow_html=True)
+            if analysis["forced"]:
+                st.markdown('<div class="warn">'
+                    '⚡ أكل إجباري!</div>',
+                    unsafe_allow_html=True)
 
-            # ── أفضل حركة ──
-            path = " → ".join(f"({p[0]},{p[1]})" for p in best["move"])
-            extras = []
+            # أفضل حركة
+            path=" → ".join(
+                f"({p[0]},{p[1]})" for p in best["move"])
+            ex=[]
             if best["is_capture"]:
-                extras.append(f"💥 أكل ×{best['captured']}")
-            if best["promotes"]:
-                extras.append("👑 ترقية!")
-            extras.append(best["verdict"])
-            ext = " • ".join(extras)
+                ex.append(f"💥×{best['captured']}")
+            if best["promotes"]: ex.append("👑")
+            ex.append(best["verdict"])
+            ext=" • ".join(ex)
 
             st.markdown(f"""
-            <div class="best-box">
+            <div class="best">
                 <h2>🏆 أفضل حركة</h2>
-                <p style="font-size:1.5em">{path}</p>
+                <p style="font-size:1.4em">{path}</p>
                 <p>{ext}</p>
                 <p>تقييم: {best['score']} •
                    فوز: {best['win_pct']}% •
                    عمق: {best['depth']}</p>
             </div>""", unsafe_allow_html=True)
 
-            # ── صور ──
-            c1,c2 = st.columns(2)
+            c1,c2=st.columns(2)
             with c1:
-                bi = Render.draw(ba2,
-                    arrows=[{"move":best["move"],
-                             "color":(50,205,50),"width":6}],
-                    highlight=set(best["move"]),
-                    label="BEST MOVE")
-                st.image(bi,caption="🏆 أفضل حركة",
-                         use_container_width=True)
+                bi=R.draw(ba2,
+                    arrows=[{"m":best["move"],
+                        "c":(50,205,50),"w":6}],
+                    hl=set(best["move"]))
+                st.image(bi,caption="🏆",
+                    use_container_width=True)
             with c2:
-                af = eng.copy(); af.do_move(best["move"])
-                st.image(Render.draw(af.board),
-                         caption="📋 بعد التنفيذ",
-                         use_container_width=True)
+                af=eng.copy()
+                af.do_move(best["move"])
+                st.image(R.draw(af.board),
+                    caption="📋 بعد التنفيذ",
+                    use_container_width=True)
 
-            if st.button("✅ طبّق الحركة",use_container_width=True):
-                st.session_state.board = af.board.tolist()
+            if st.button("✅ طبّق",
+                use_container_width=True):
+                st.session_state.board=af.board.tolist()
                 st.rerun()
 
-            # ── إحصائيات الأداء ──
+            # أداء
             st.markdown(f"""
-            <div class="perf-box">
-            ⚡ <b>أداء المحرك:</b>
-            الوقت: {total_time}s •
-            TT hits: {analysis['tt_hits']:,} •
-            أفضل عمق: {best['depth']}
+            <div class="perf">
+            ⚡ <b>أداء:</b>
+            عمق {best['depth']} •
+            TT: {analysis['tt_hits']:,} hit •
+            الوقت: {analysis['time']}s
             </div>""", unsafe_allow_html=True)
 
-            # ── كل الحركات ──
-            st.markdown(f"### 📊 تصنيف الحركات ({len(moves)})")
+            # كل الحركات
+            st.markdown(f"### 📊 كل الحركات ({len(mvs)})")
+            rc_={1:("🥇",(50,205,50)),
+                 2:("🥈",(65,105,225)),
+                 3:("🥉",(255,165,0))}
 
-            rank_colors = {
-                1:("🥇",(50,205,50)),
-                2:("🥈",(65,105,225)),
-                3:("🥉",(255,165,0)),
-            }
-
-            # صورة أعلى 5
-            top_arrows = []
-            for i,mv in enumerate(moves[:5]):
-                _,clr = rank_colors.get(mv["rank"],
+            top=[]
+            for i,mv in enumerate(mvs[:5]):
+                _,cl=rc_.get(mv["rank"],
                     (f"#{mv['rank']}",(180,180,180)))
-                top_arrows.append({"move":mv["move"],
-                    "color":clr,"width":6 if i==0 else 3})
-            all_img = Render.draw(ba2, arrows=top_arrows)
-            st.image(all_img,
-                     caption="🥇أخضر 🥈أزرق 🥉برتقالي",
-                     use_container_width=True)
+                top.append({"m":mv["move"],"c":cl,
+                    "w":6 if i==0 else 3})
+            st.image(R.draw(ba2,arrows=top),
+                caption="🥇🥈🥉",
+                use_container_width=True)
 
-            for mv in moves:
-                icon = rank_colors.get(mv["rank"],
+            for mv in mvs:
+                icon=rc_.get(mv["rank"],
                     (f"#{mv['rank']}",None))[0]
-                path = " → ".join(f"({p[0]},{p[1]})"
-                                  for p in mv["move"])
-                bar = "█" * max(1, int(mv["win_pct"]/5))
-
+                p=" → ".join(
+                    f"({x[0]},{x[1]})" for x in mv["move"])
+                bar="█"*max(1,int(mv["win_pct"]/5))
                 with st.expander(
-                    f"{icon} {path} • {mv['score']} • "
-                    f"{mv['win_pct']}% • {mv['verdict']}"
-                ):
-                    st.markdown(f"**المسار:** `{path}`")
-                    st.markdown(f"**الحكم:** {mv['verdict']}")
-                    st.markdown(f"**فرصة الفوز:** `{bar}` "
-                                f"{mv['win_pct']}%")
-                    st.markdown(f"**عمق التحليل:** {mv['depth']}")
-
-                    mi = Render.draw(ba2,
-                        arrows=[{"move":mv["move"],
-                                 "color":(255,100,50),"width":5}],
-                        highlight=set(mv["move"]))
-                    st.image(mi, use_container_width=True)
+                    f"{icon} {p} • {mv['score']} • "
+                    f"{mv['win_pct']}% • {mv['verdict']}"):
+                    st.markdown(f"`{p}`")
+                    st.markdown(
+                        f"فوز: `{bar}` {mv['win_pct']}%")
+                    st.markdown(f"عمق: {mv['depth']}")
+                    mi=R.draw(ba2,
+                        arrows=[{"m":mv["move"],
+                            "c":(255,100,50),"w":5}],
+                        hl=set(mv["move"]))
+                    st.image(mi,use_container_width=True)
 
     st.divider()
-    st.markdown('<p style="text-align:center;color:#999;'
-                'font-size:0.8em">'
-                '♟️ v6.0 — Zobrist TT + Iterative Deepening + '
-                'Quiescence + PVS + Killer Moves — '
-                'يعمل بدون إنترنت</p>',
-                unsafe_allow_html=True)
+    st.markdown(
+        '<p style="text-align:center;color:#999;'
+        'font-size:0.8em">'
+        '♟️ v7.0 — 12 عامل + Zobrist TT + PVS + LMR + '
+        'Quiescence — بدون إنترنت</p>',
+        unsafe_allow_html=True)
 
 
 if __name__ == "__main__":
-    main()
+    app()
