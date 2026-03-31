@@ -768,7 +768,7 @@ class Beast:
 
 class DamaCoach:
     URL = "https://api.groq.com/openai/v1/chat/completions"
-    MODEL = "llama-3.1-70b-versatile"
+    MODEL = "llama-3.3-70b-versatile"
 
     def __init__(self, api_key=None):
         self.api_key = api_key
