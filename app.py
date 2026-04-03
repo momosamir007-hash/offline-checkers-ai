@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
 ╔══════════════════════════════════════════════════════╗
-║       ♟️ مساعد الداما الذكي — النسخة النهائية v11    ║
+║       ♟️ مساعد الداما الذكي — النسخة النهائية v12    ║
 ║  Bitboard Engine + XGBoost Model + Groq + OpenCV     ║
-║  مدمج مع نموذج التدريب العميق Brutal AI (مصحح)       ║
+║  تم إصلاح كارثة الـ Target Variable Paradox          ║
 ╚══════════════════════════════════════════════════════╝
 """
 
@@ -43,7 +43,6 @@ if HAS_XGB and os.path.exists(MODEL_PATH):
 # 1. جداول محسوبة مسبقاً
 # ══════════════════════════════════════════════════════
 
-# تحويل المربعات 0-31 إلى (صف, عمود) والعكس
 SQ_TO_RC = []
 RC_TO_SQ = {}
 _sq = 0
@@ -54,7 +53,6 @@ for _r in range(8):
             RC_TO_SQ[(_r, _c)] = _sq
             _sq += 1
 
-# جيران كل مربع: [NW, NE, SW, SE] أو -1
 NBR = []
 for _sq in range(32):
     _r, _c = SQ_TO_RC[_sq]
@@ -67,7 +65,6 @@ for _sq in range(32):
             _nb.append(-1)
     NBR.append(tuple(_nb))
 
-# جدول القفز: (وسط, هبوط) لكل اتجاه
 JUMP_TABLE = []
 for _sq in range(32):
     _jt = []
@@ -80,7 +77,6 @@ for _sq in range(32):
             _jt.append((_mid, _land) if _land != -1 else (-1, -1))
     JUMP_TABLE.append(tuple(_jt))
 
-# أقنعة الصفوف
 ROW_MASK = [0] * 8
 for _sq in range(32):
     _r = SQ_TO_RC[_sq][0]
@@ -89,7 +85,6 @@ for _sq in range(32):
 W_PROMO = ROW_MASK[0]
 B_PROMO = ROW_MASK[7]
 
-# أقنعة المركز
 CENTER_MASK = 0
 INNER_CENTER = 0
 for _sq in range(32):
@@ -99,7 +94,6 @@ for _sq in range(32):
     if 3 <= _r <= 4 and 3 <= _c <= 4:
         INNER_CENTER |= (1 << _sq)
 
-# قيم موضعية لكل مربع
 W_POS_VAL = []
 B_POS_VAL = []
 K_POS_VAL = []
@@ -120,7 +114,6 @@ for _sq in range(32):
     dist = abs(_r - 3.5) + abs(_c - 3.5)
     K_POS_VAL.append(max(0, int(8 - dist * 1.5)))
 
-# Zobrist
 _RNG = random.Random(42)
 Z_KEYS = {}
 for _p in range(4):
@@ -128,7 +121,6 @@ for _p in range(4):
         Z_KEYS[(_p, _sq)] = _RNG.getrandbits(64)
 Z_SIDE = _RNG.getrandbits(64)
 
-# الوضعية الابتدائية
 INIT_BP = sum(1 << i for i in range(12))
 INIT_WP = sum(1 << i for i in range(20, 32))
 
@@ -215,15 +207,11 @@ class BB:
         found = False
         for d in dirs:
             mid, land = JUMP_TABLE[sq][d]
-            if mid == -1 or land == -1:
-                continue
-            if not ((1 << mid) & opp):
-                continue
-            if mid in eaten:
-                continue
+            if mid == -1 or land == -1: continue
+            if not ((1 << mid) & opp): continue
+            if mid in eaten: continue
             if not ((1 << land) & empty):
-                if land != path[0]:
-                    continue
+                if land != path[0]: continue
 
             found = True
             promo = False
@@ -349,8 +337,7 @@ class TT:
             self.t[key] = (depth, sc, fl, mv)
             if len(self.t) > self.sz:
                 ks = list(self.t.keys())
-                for k_ in ks[:len(ks) // 2]:
-                    del self.t[k_]
+                for k_ in ks[:len(ks) // 2]: del self.t[k_]
 
     def best(self, key):
         e = self.t.get(key)
@@ -361,7 +348,7 @@ class TT:
 
 
 # ══════════════════════════════════════════════════════
-# 4. المحرك الوحشي (Beast AI) المصحح لـ XGBoost
+# 4. المحرك الوحشي (Beast AI) - مُعالج مشكلة الترجمة
 # ══════════════════════════════════════════════════════
 
 class Beast:
@@ -378,43 +365,51 @@ class Beast:
         self._eval_cache = {}  
 
     def evaluate(self, bb, white_turn):
-        # 1. التحقق من الفوز/الخسارة الحتمية
         w = bb.winner()
         if w is not None:
             if w == 0: return 0
             my_win = (w == 1 and white_turn) or (w == 2 and not white_turn)
             return 99999 if my_win else -99999
 
-        # 2. فحص الذاكرة المؤقتة لتسريع الحساب
         cache_key = (bb.wp, bb.bp, bb.k, white_turn)
         if cache_key in self._eval_cache:
             return self._eval_cache[cache_key]
 
-        # 3. استخدام نموذج الذكاء الاصطناعي (XGBoost) إن وجد
+        # 🤖 استخدام الـ XGBoost المعالج
         if AI_MODEL is not None:
             grid = bb.to_grid().flatten()
-            
-            # الدقة هنا: نمرر دور اللاعب الحالي الفعلي في الشجرة
             turn = 1 if white_turn else 0
             
             features = np.append(grid, turn).reshape(1, -1)
             feature_names = [f"sq_{i}" for i in range(64)] + ["player_turn"]
             
             dmatrix = xgb.DMatrix(features, feature_names=feature_names)
+            raw_score = float(AI_MODEL.predict(dmatrix)[0])
             
-            # النموذج مدرب ليعطي التقييم المطلق (عادة من منظور الأبيض)
-            score = float(AI_MODEL.predict(dmatrix)[0])
+            # جلب إعدادات المستخدم لفهم الأرقام
+            mode = st.session_state.get('ml_target_mode', '1=الأبيض يفوز, 2=الأسود يفوز')
             
-            # خوارزمية NegaMax تتطلب التقييم من منظور اللاعب الذي عليه الدور!
-            res = score if white_turn else -score
+            if "1=الأبيض" in mode:
+                # 🔴 إصلاح الكارثة: تحويل 1 و 2 إلى تقييم حقيقي للأبيض والأسود
+                # إذا كان raw_score = 1 (أبيض) -> (1 - 1.5) * -2000 = +1000
+                # إذا كان raw_score = 2 (أسود) -> (2 - 1.5) * -2000 = -1000
+                abs_score = -(raw_score - 1.5) * 2000
+                res = abs_score if white_turn else -abs_score
+                
+            elif "اللاعب الحالي" in mode:
+                # النموذج يخبرنا بنسبة فوز اللاعب الذي عليه الدور (وهذا ما تريده خوارزمية البحث)
+                res = raw_score * 1000
+                
+            else:
+                # التقييم المطلق المعياري (مثل Stockfish)
+                res = raw_score if white_turn else -raw_score
+                
             self._eval_cache[cache_key] = res
             return res
 
-        # 4. التقييم اليدوي الكلاسيكي (بديل)
-        wm = bb.wp & ~bb.k
-        bm = bb.bp & ~bb.k
-        wk = bb.wp & bb.k
-        bk = bb.bp & bb.k
+        # 4. التقييم اليدوي الكلاسيكي
+        wm = bb.wp & ~bb.k; bm = bb.bp & ~bb.k
+        wk = bb.wp & bb.k; bk = bb.bp & bb.k
 
         wn = popcount(wm); wkn = popcount(wk)
         bn = popcount(bm); bkn = popcount(bk)
@@ -455,8 +450,7 @@ class Beast:
                 mid, land = JUMP_TABLE[sq][d]
                 if mid != -1 and land != -1:
                     if (1 << mid) & bb.bp and not ((1 << land) & occ):
-                        sc += 8
-                        break
+                        sc += 8; break
 
             for d in range(4):
                 mid, land = JUMP_TABLE[sq][d]
@@ -468,8 +462,7 @@ class Beast:
                         a_mid, a_land = JUMP_TABLE[attacker_sq][ad]
                         if a_mid == sq and a_land != -1:
                             if (1 << attacker_sq) & bb.bp and not ((1 << a_land) & occ):
-                                sc -= 12
-                                break
+                                sc -= 12; break
 
             if not is_k:
                 r = SQ_TO_RC[sq][0]
@@ -501,8 +494,7 @@ class Beast:
                 mid, land = JUMP_TABLE[sq][d]
                 if mid != -1 and land != -1:
                     if (1 << mid) & bb.wp and not ((1 << land) & occ):
-                        sc -= 8
-                        break
+                        sc -= 8; break
 
             if not is_k:
                 r = SQ_TO_RC[sq][0]
@@ -682,9 +674,7 @@ class Beast:
             sub.tt = self.tt
             sub._eval_cache = self._eval_cache
             
-            # هنا يتبادل الأدوار (الخصم يبحث عن أفضل رد)
             res = sub.find_best(child, not white)
-            # النتيجة نعكسها لنحصل على التقييم بالنسبة لنا
             sc = -res["score"]
 
             is_capt = len(mv) > 2
@@ -1033,19 +1023,32 @@ def app():
     if "board" not in st.session_state: st.session_state.board = BB().to_grid().tolist()
     if "coach" not in st.session_state: st.session_state.coach = DamaCoach()
 
-    st.title("♟️ مساعد الداما الذكي (Brutal AI - مصحح)")
+    st.title("♟️ مساعد الداما الذكي (Brutal AI)")
     st.caption("Bitboard Engine + XGBoost Model + Groq AI Coach")
 
     if AI_MODEL:
-        st.success("🧠 نموذج الذكاء الاصطناعي (XGBoost) محمل وفعال (تم إصلاح تقييم NegaMax)!")
+        st.success("🧠 نموذج الذكاء الاصطناعي محمل! (استخدم الشريط الجانبي لضبط فهم الأرقام)")
     else:
         st.warning("⚠️ نموذج الذكاء الاصطناعي مفقود! سيتم استخدام التقييم اليدوي.")
 
     with st.sidebar:
-        st.header("⚙️ الإعدادات")
+        st.header("⚙️ الإعدادات العامة")
         mc = st.radio("♟️ لونك:", ["⚪ أبيض", "⚫ أسود"])
         fw = "أبيض" in mc
         tt = st.select_slider("⏱ وقت التحليل:", [1, 2, 3, 5, 8, 10, 15], value=3)
+
+        st.divider()
+        # 🟢 لوحة التحكم السحرية التي تحل مشكلة "الغباء"
+        st.markdown("### 🧠 إعدادات فك تشفير النموذج")
+        st.session_state.ml_target_mode = st.selectbox(
+            "ماذا تعني أرقام النموذج الخاص بك؟",
+            [
+                "1=الأبيض يفوز, 2=الأسود يفوز (الافتراضي)",
+                "نسبة فوز اللاعب الحالي (نسبي)",
+                "موجب=أبيض متفوق, سالب=أسود متفوق (مطلق)"
+            ],
+            help="إذا كان السكريبت يضحي بقطعه بغباء، فالسبب هو أن الخوارزمية تحاول الوصول للرقم 2 (لأنها تظن أن 2 أكبر وأفضل من 1). الخيار الافتراضي يصحح هذه الكارثة."
+        )
 
         st.divider()
         st.markdown("### 🤖 المدرب الذكي (Groq)")
