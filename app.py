@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
 ╔══════════════════════════════════════════════════════╗
-║       ♟️ مساعد الداما الذكي — النسخة النهائية v10    ║
+║       ♟️ مساعد الداما الذكي — النسخة النهائية v11    ║
 ║  Bitboard Engine + XGBoost Model + Groq + OpenCV     ║
-║  مدمج مع نموذج التدريب العميق Brutal AI              ║
+║  مدمج مع نموذج التدريب العميق Brutal AI (مصحح)       ║
 ╚══════════════════════════════════════════════════════╝
 """
 
@@ -29,7 +29,7 @@ except ImportError:
 # تحميل نموذج التدريب العميق (XGBoost)
 # ══════════════════════════════════════════════════════
 AI_MODEL = None
-MODEL_PATH = "brutal_ai_model.json"
+MODEL_PATH = "brutal_ai_model (1).json"
 
 if HAS_XGB and os.path.exists(MODEL_PATH):
     try:
@@ -361,7 +361,7 @@ class TT:
 
 
 # ══════════════════════════════════════════════════════
-# 4. المحرك الوحشي (Beast AI) مع دمج XGBoost
+# 4. المحرك الوحشي (Beast AI) المصحح لـ XGBoost
 # ══════════════════════════════════════════════════════
 
 class Beast:
@@ -375,43 +375,42 @@ class Beast:
         self.depth_r = 0
         self.killers = [[None, None] for _ in range(64)]
         self.hist = {}
-        self._eval_cache = {}  # نظام الكاش لتسريع نموذج الذكاء الاصطناعي
+        self._eval_cache = {}  
 
-    def evaluate(self, bb, for_white):
+    def evaluate(self, bb, white_turn):
         # 1. التحقق من الفوز/الخسارة الحتمية
         w = bb.winner()
         if w is not None:
             if w == 0: return 0
-            my_win = (w == 1 and for_white) or (w == 2 and not for_white)
+            my_win = (w == 1 and white_turn) or (w == 2 and not white_turn)
             return 99999 if my_win else -99999
 
         # 2. فحص الذاكرة المؤقتة لتسريع الحساب
-        cache_key = (bb.wp, bb.bp, bb.k, for_white)
+        cache_key = (bb.wp, bb.bp, bb.k, white_turn)
         if cache_key in self._eval_cache:
             return self._eval_cache[cache_key]
 
         # 3. استخدام نموذج الذكاء الاصطناعي (XGBoost) إن وجد
         if AI_MODEL is not None:
-            # تحويل اللوحة إلى مصفوفة 1D من 64 عنصر
             grid = bb.to_grid().flatten()
             
-            # تحديد دور اللاعب
-            turn = 1 if for_white else 0
+            # الدقة هنا: نمرر دور اللاعب الحالي الفعلي في الشجرة
+            turn = 1 if white_turn else 0
             
-            # تجميع الـ 65 ميزة المطلوبة
             features = np.append(grid, turn).reshape(1, -1)
             feature_names = [f"sq_{i}" for i in range(64)] + ["player_turn"]
             
             dmatrix = xgb.DMatrix(features, feature_names=feature_names)
             
-            # تقييم النموذج للوضعية الحالية
+            # النموذج مدرب ليعطي التقييم المطلق (عادة من منظور الأبيض)
             score = float(AI_MODEL.predict(dmatrix)[0])
             
-            # تخزين النتيجة في الكاش للعودة إليها مستقبلاً
-            self._eval_cache[cache_key] = score
-            return score
+            # خوارزمية NegaMax تتطلب التقييم من منظور اللاعب الذي عليه الدور!
+            res = score if white_turn else -score
+            self._eval_cache[cache_key] = res
+            return res
 
-        # 4. التقييم اليدوي الكلاسيكي (بديل في حالة عدم العثور على النموذج)
+        # 4. التقييم اليدوي الكلاسيكي (بديل)
         wm = bb.wp & ~bb.k
         bm = bb.bp & ~bb.k
         wk = bb.wp & bb.k
@@ -526,7 +525,7 @@ class Beast:
             diff = (wn + wkn * 2) - (bn + bkn * 2)
             sc += diff * 15
 
-        res = sc if for_white else -sc
+        res = sc if white_turn else -sc
         self._eval_cache[cache_key] = res
         return res
 
@@ -550,13 +549,13 @@ class Beast:
         scored.sort(key=lambda x: x[0], reverse=True)
         return [m for _, m in scored]
 
-    def _quiesce(self, bb, alpha, beta, white, for_w, qd=0):
+    def _quiesce(self, bb, alpha, beta, white, qd=0):
         self.nodes += 1
         if self.nodes & 4095 == 0:
             if time.time() - self.t0 >= self.max_time:
                 self.stop = True; return 0
 
-        stand = self.evaluate(bb, for_w)
+        stand = self.evaluate(bb, white)
         if qd >= 6: return stand
         if stand >= beta: return beta
         if stand > alpha: alpha = stand
@@ -567,13 +566,13 @@ class Beast:
         for mv in moves:
             child = bb.copy()
             child.do_move(mv, white)
-            sc = -self._quiesce(child, -beta, -alpha, not white, for_w, qd + 1)
+            sc = -self._quiesce(child, -beta, -alpha, not white, qd + 1)
             if self.stop: return 0
             if sc >= beta: return beta
             if sc > alpha: alpha = sc
         return alpha
 
-    def _search(self, bb, depth, alpha, beta, white, for_w, pv=True):
+    def _search(self, bb, depth, alpha, beta, white, pv=True):
         self.nodes += 1
         if self.nodes & 4095 == 0:
             if time.time() - self.t0 >= self.max_time:
@@ -582,11 +581,11 @@ class Beast:
         w = bb.winner()
         if w is not None:
             if w == 0: return 0, None
-            my_win = (w == 1 and for_w) or (w == 2 and not for_w)
+            my_win = (w == 1 and white) or (w == 2 and not white)
             return (99999 + depth if my_win else -99999 - depth), None
 
         if depth <= 0:
-            return self._quiesce(bb, alpha, beta, white, for_w), None
+            return self._quiesce(bb, alpha, beta, white), None
 
         key = bb.zobrist(white)
         tr = self.tt.probe(key, depth, alpha, beta)
@@ -612,14 +611,14 @@ class Beast:
                 red = 1 if i < 8 else 2
 
             if i == 0:
-                sc = -self._search(child, depth - 1, -beta, -alpha, not white, for_w, True)[0]
+                sc = -self._search(child, depth - 1, -beta, -alpha, not white, True)[0]
             else:
-                sc = -self._search(child, depth - 1 - red, -alpha - 1, -alpha, not white, for_w, False)[0]
+                sc = -self._search(child, depth - 1 - red, -alpha - 1, -alpha, not white, False)[0]
                 if alpha < sc < beta and not self.stop:
                     if red > 0:
-                        sc = -self._search(child, depth - 1, -alpha - 1, -alpha, not white, for_w, False)[0]
+                        sc = -self._search(child, depth - 1, -alpha - 1, -alpha, not white, False)[0]
                     if alpha < sc < beta and not self.stop:
-                        sc = -self._search(child, depth - 1, -beta, -sc, not white, for_w, True)[0]
+                        sc = -self._search(child, depth - 1, -beta, -sc, not white, True)[0]
 
             if self.stop: break
             i += 1
@@ -651,7 +650,7 @@ class Beast:
         best_mv = None; best_sc = 0; log = []
 
         for d in range(1, 50):
-            sc, mv = self._search(bb, d, float("-inf"), float("inf"), white, white, True)
+            sc, mv = self._search(bb, d, float("-inf"), float("inf"), white, True)
             if self.stop: break
             if mv is not None:
                 best_mv = mv; best_sc = sc; self.depth_r = d
@@ -682,7 +681,10 @@ class Beast:
             sub = Beast(max_time=each)
             sub.tt = self.tt
             sub._eval_cache = self._eval_cache
+            
+            # هنا يتبادل الأدوار (الخصم يبحث عن أفضل رد)
             res = sub.find_best(child, not white)
+            # النتيجة نعكسها لنحصل على التقييم بالنسبة لنا
             sc = -res["score"]
 
             is_capt = len(mv) > 2
@@ -1031,11 +1033,11 @@ def app():
     if "board" not in st.session_state: st.session_state.board = BB().to_grid().tolist()
     if "coach" not in st.session_state: st.session_state.coach = DamaCoach()
 
-    st.title("♟️ مساعد الداما الذكي (Brutal AI)")
+    st.title("♟️ مساعد الداما الذكي (Brutal AI - مصحح)")
     st.caption("Bitboard Engine + XGBoost Model + Groq AI Coach")
 
     if AI_MODEL:
-        st.success("🧠 نموذج الذكاء الاصطناعي (XGBoost) محمل وفعال!")
+        st.success("🧠 نموذج الذكاء الاصطناعي (XGBoost) محمل وفعال (تم إصلاح تقييم NegaMax)!")
     else:
         st.warning("⚠️ نموذج الذكاء الاصطناعي مفقود! سيتم استخدام التقييم اليدوي.")
 
