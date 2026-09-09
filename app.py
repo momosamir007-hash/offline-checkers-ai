@@ -11,6 +11,7 @@ import streamlit as st
 import numpy as np
 from PIL import Image, ImageDraw
 import time, random, json, urllib.request, urllib.error, os
+from pathlib import Path
 from enum import IntEnum
 
 try:
@@ -29,9 +30,9 @@ except ImportError:
 # تحميل نموذج التدريب العميق (XGBoost)
 # ══════════════════════════════════════════════════════
 AI_MODEL = None
-MODEL_PATH = "brutal_ai_model (1).json"
+MODEL_PATH = Path(__file__).resolve().parent / "brutal_ai_model (1).json"
 
-if HAS_XGB and os.path.exists(MODEL_PATH):
+if HAS_XGB and MODEL_PATH.exists():
     try:
         AI_MODEL = xgb.Booster()
         AI_MODEL.load_model(MODEL_PATH)
@@ -178,9 +179,10 @@ class BB:
         for sq in iter_bits(my):
             is_king = bool((1 << sq) & self.k)
             dirs = K_DIRS if is_king else (W_DIRS if white else B_DIRS)
+            jump_dirs = K_DIRS if not is_king else K_DIRS
 
             can_jump = False
-            for d in dirs:
+            for d in jump_dirs:
                 mid, land = JUMP_TABLE[sq][d]
                 if mid != -1 and land != -1:
                     if (1 << mid) & opp and (1 << land) & empty:
@@ -189,7 +191,7 @@ class BB:
 
             if can_jump:
                 chains = []
-                self._find_jumps(sq, dirs, my, opp, empty,
+                self._find_jumps(sq, jump_dirs, my, opp, empty,
                                  is_king, white, chains, frozenset(), [sq])
                 all_jumps.extend(chains)
             else:
@@ -199,8 +201,8 @@ class BB:
                         all_simple.append((sq, nb))
 
         if all_jumps:
-            mx = max(len(j) for j in all_jumps)
-            return [tuple(j) for j in all_jumps if len(j) == mx], True
+            # Standard American/English draughts: every legal capture is allowed.
+            return [tuple(j) for j in all_jumps], True
         return all_simple, False
 
     def _find_jumps(self, sq, dirs, my, opp, empty, is_king, white, out, eaten, path):
@@ -271,6 +273,16 @@ class BB:
     def winner(self):
         if self.wp == 0: return 2
         if self.bp == 0: return 1
+        return None
+
+    def status(self, white_turn):
+        """Return winner/draw state from the side to move."""
+        w = self.winner()
+        if w is not None:
+            return w
+        moves, _ = self.get_moves(white_turn)
+        if not moves:
+            return 2 if white_turn else 1
         return None
 
     def full_winner(self):
@@ -375,37 +387,18 @@ class Beast:
         if cache_key in self._eval_cache:
             return self._eval_cache[cache_key]
 
-        # 🤖 استخدام الـ XGBoost المعالج
+        # ML output is treated as an auxiliary regressor, never as a winner code.
+        # The bundled model expects 65 features (64 squares + side-to-move).
+        ml_score = None
         if AI_MODEL is not None:
-            grid = bb.to_grid().flatten()
-            turn = 1 if white_turn else 0
-            
-            features = np.append(grid, turn).reshape(1, -1)
-            feature_names = [f"sq_{i}" for i in range(64)] + ["player_turn"]
-            
-            dmatrix = xgb.DMatrix(features, feature_names=feature_names)
-            raw_score = float(AI_MODEL.predict(dmatrix)[0])
-            
-            # جلب إعدادات المستخدم لفهم الأرقام
-            mode = st.session_state.get('ml_target_mode', '1=الأبيض يفوز, 2=الأسود يفوز')
-            
-            if "1=الأبيض" in mode:
-                # 🔴 إصلاح الكارثة: تحويل 1 و 2 إلى تقييم حقيقي للأبيض والأسود
-                # إذا كان raw_score = 1 (أبيض) -> (1 - 1.5) * -2000 = +1000
-                # إذا كان raw_score = 2 (أسود) -> (2 - 1.5) * -2000 = -1000
-                abs_score = -(raw_score - 1.5) * 2000
-                res = abs_score if white_turn else -abs_score
-                
-            elif "اللاعب الحالي" in mode:
-                # النموذج يخبرنا بنسبة فوز اللاعب الذي عليه الدور (وهذا ما تريده خوارزمية البحث)
-                res = raw_score * 1000
-                
-            else:
-                # التقييم المطلق المعياري (مثل Stockfish)
-                res = raw_score if white_turn else -raw_score
-                
-            self._eval_cache[cache_key] = res
-            return res
+            try:
+                features = np.append(bb.to_grid().flatten().astype(np.float32), 1.0 if white_turn else 0.0).reshape(1, -1)
+                raw_score = float(AI_MODEL.predict(xgb.DMatrix(features))[0])
+                if np.isfinite(raw_score):
+                    # Protect search from malformed/out-of-domain regression values.
+                    ml_score = float(np.clip(raw_score, -2000.0, 2000.0))
+            except Exception:
+                ml_score = None
 
         # 4. التقييم اليدوي الكلاسيكي
         wm = bb.wp & ~bb.k; bm = bb.bp & ~bb.k
@@ -517,6 +510,11 @@ class Beast:
             diff = (wn + wkn * 2) - (bn + bkn * 2)
             sc += diff * 15
 
+        # Blend the bounded regressor with the transparent classical evaluation.
+        # If the model was trained from the opposite perspective, it is safer to
+        # let the classical evaluator dominate than to inject extreme values.
+        if ml_score is not None:
+            sc = 0.75 * sc + 0.25 * ml_score
         res = sc if white_turn else -sc
         self._eval_cache[cache_key] = res
         return res
@@ -543,8 +541,7 @@ class Beast:
 
     def _quiesce(self, bb, alpha, beta, white, qd=0):
         self.nodes += 1
-        if self.nodes & 4095 == 0:
-            if time.time() - self.t0 >= self.max_time:
+        if time.time() - self.t0 >= self.max_time:
                 self.stop = True; return 0
 
         stand = self.evaluate(bb, white)
@@ -555,7 +552,11 @@ class Beast:
         moves, is_cap = bb.get_moves(white)
         if not is_cap: return stand
 
-        for mv in moves:
+        for idx, mv in enumerate(moves):
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                break
+            per_move = max(0.03, remaining / max(1, len(moves) - idx))
             child = bb.copy()
             child.do_move(mv, white)
             sc = -self._quiesce(child, -beta, -alpha, not white, qd + 1)
@@ -566,8 +567,7 @@ class Beast:
 
     def _search(self, bb, depth, alpha, beta, white, pv=True):
         self.nodes += 1
-        if self.nodes & 4095 == 0:
-            if time.time() - self.t0 >= self.max_time:
+        if time.time() - self.t0 >= self.max_time:
                 self.stop = True; return 0, None
 
         w = bb.winner()
@@ -664,13 +664,14 @@ class Beast:
         moves, is_cap = bb.get_moves(white)
         if not moves: return None
 
-        each = max(0.3, self.max_time * 0.6 / len(moves))
+        deadline = self.t0 + self.max_time
+        each = max(0.05, self.max_time / max(1, len(moves)))
         results = []
 
         for mv in moves:
             child = bb.copy()
             child.do_move(mv, white)
-            sub = Beast(max_time=each)
+            sub = Beast(max_time=min(each, per_move))
             sub.tt = self.tt
             sub._eval_cache = self._eval_cache
             
@@ -708,7 +709,11 @@ class Beast:
                 "promotes": promo, "verdict": v, "win_pct": wp})
 
         results.sort(key=lambda x: x["score"], reverse=True)
-        for i, r in enumerate(results): r["rank"] = i + 1
+        for i, r in enumerate(results):
+            r["rank"] = i + 1
+            r["score_loss"] = round(max(0.0, results[0]["score"] - r["score"]), 1)
+            loss = r["score_loss"]
+            r["mistake_level"] = "الأفضل" if i == 0 else ("طفيف" if loss < 30 else "متوسط" if loss < 100 else "كبير")
 
         pe = self.evaluate(bb, white)
         return {"moves": results,
